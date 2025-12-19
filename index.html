@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Account · WZZ</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+:root{
+  --primary:#512da8;--secondary:#00c6ff;--danger:#ff3b30;
+  --bg:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+  --glass:rgba(255,255,255,0.15);
+}
+*{box-sizing:border-box;font-family:'Segoe UI',sans-serif;margin:0;padding:0;}
+body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);background-size:200% 200%;animation:gradient 15s ease infinite;}
+@keyframes gradient{0%{background-position:0% 50%;}50%{background-position:100% 50%;}100%{background-position:0% 50%;}}
+.card{width:100%;max-width:400px;background:var(--glass);border:1px solid rgba(255,255,255,0.2);border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,0.2);backdrop-filter:blur(8px);padding:40px 32px;}
+h2{text-align:center;color:#fff;margin-bottom:24px;font-weight:600;}
+.tabs{display:flex;margin-bottom:24px;border-bottom:1px solid rgba(255,255,255,0.3);}
+.tabs button{flex:1;background:none;border:none;color:#fff;opacity:0.7;padding:10px;font-size:16px;cursor:pointer;transition:opacity .3s;}
+.tabs button.active{opacity:1;border-bottom:2px solid var(--secondary);}
+form{display:flex;flex-direction:column;gap:14px;}
+label{color:rgba(255,255,255,0.9);font-size:14px;}
+input{padding:12px;border:none;border-radius:8px;background:rgba(255,255,255,0.9);font-size:14px;}
+input:focus{outline:none;box-shadow:0 0 0 2px var(--secondary);}
+.error{color:var(--danger);font-size:12px;height:16px;}
+.success{color:#34c759;font-size:12px;height:16px;}
+button[type="submit"]{padding:12px;border:none;border-radius:8px;background:var(--secondary);color:#fff;font-size:16px;font-weight:600;cursor:pointer;transition:background .3s;}
+button[type="submit"]:disabled{background:#90c2ff;}
+.pwd-strength{font-size:11px;color:rgba(255,255,255,0.8);}
+.hide{display:none;}
+@media(max-width:480px){.card{padding:32px 20px;}}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="tabs">
+    <button id="tabLogin" class="active">登录</button>
+    <button id="tabReg">注册</button>
+  </div>
+
+  <!-- 登录 -->
+  <form id="loginForm">
+    <label>邮箱</label>
+    <input type="email" id="loginEmail" required placeholder="name@example.com" />
+    <div class="error" id="loginEmailErr"></div>
+
+    <label>密码</label>
+    <input type="password" id="loginPwd" required minlength="6" maxlength="20" placeholder="6-20 位字符" />
+    <div class="error" id="loginPwdErr"></div>
+
+    <button type="submit">登录</button>
+    <div class="success" id="loginSucc"></div>
+  </form>
+
+  <!-- 注册 -->
+  <form id="regForm" class="hide">
+    <label>邮箱</label>
+    <input type="email" id="regEmail" required placeholder="name@example.com" />
+    <div class="error" id="regEmailErr"></div>
+
+    <label>密码</label>
+    <input type="password" id="regPwd" required minlength="6" maxlength="20" placeholder="6-20 位字符" />
+    <div class="pwd-strength" id="pwdStrength"></div>
+    <div class="error" id="regPwdErr"></div>
+
+    <label>确认密码</label>
+    <input type="password" id="regPwd2" required placeholder="再次输入密码" />
+    <div class="error" id="regPwd2Err"></div>
+
+    <button type="submit">注册</button>
+    <div class="success" id="regSucc"></div>
+  </form>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const tabLogin=$('tabLogin'),tabReg=$('tabReg'),loginForm=$('loginForm'),regForm=$('regForm');
+tabLogin.onclick=()=>{tabLogin.classList.add('active');tabReg.classList.remove('active');loginForm.classList.remove('hide');regForm.classList.add('hide');};
+tabReg.onclick=()=>{tabReg.classList.add('active');tabLogin.classList.remove('active');regForm.classList.remove('hide');loginForm.classList.add('hide');};
+const validEmail=v=>/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+const setErr=(el,msg)=>el.textContent=msg;
+const clear=()=>document.querySelectorAll('.error').forEach(e=>e.textContent='');
+$('regPwd').oninput=function(){
+  const s=this.value,l=/[a-z]/.test(s)?1:0,u=/[A-Z]/.test(s)?1:0,n=/[0-9]/.test(s)?1:0,sp=/[^A-Za-z0-9]/.test(s)?1:0;
+  const str=(l+u+n+sp)<=2?'弱':'强';$('pwdStrength').textContent='强度：'+str;
+};
+loginForm.onsubmit=async(e)=>{
+  e.preventDefault();clear();
+  const email=$('loginEmail').value.trim(),pwd=$('loginPwd').value;
+  if(!validEmail(email))return setErr($('loginEmailErr'),'邮箱格式错误');
+  if(pwd.length<6)return setErr($('loginPwdErr'),'密码至少6位');
+  const btn=e.target.querySelector('button');btn.disabled=true;btn.textContent='登录中';
+  try{
+    const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd})});
+    const data=await res.json();
+    if(res.ok){setErr($('loginSucc'),'登录成功，1 秒后跳转...');setTimeout(()=>location.href='/dashboard',1000);}
+    else{setErr($('loginPwdErr'),data.message||'账号或密码错误');}
+  }catch(err){setErr($('loginPwdErr'),'网络错误');}finally{btn.disabled=false;btn.textContent='登录';}
+};
+regForm.onsubmit=async(e)=>{
+  e.preventDefault();clear();
+  const email=$('regEmail').value.trim(),pwd=$('regPwd').value,pwd2=$('regPwd2').value;
+  if(!validEmail(email))return setErr($('regEmailErr'),'邮箱格式错误');
+  if(pwd.length<6)return setErr($('regPwdErr'),'密码至少6位');
+  if(pwd!==pwd2)return setErr($('regPwd2Err'),'两次密码不一致');
+  const btn=e.target.querySelector('button');btn.disabled=true;btn.textContent='注册中';
+  try{
+    const res=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd})});
+    const data=await res.json();
+    if(res.ok){setErr($('regSucc'),'注册成功，1 秒后去登录...');setTimeout(()=>{tabLogin.onclick();},1000);}
+    else{setErr($('regEmailErr'),data.message||'邮箱已存在');}
+  }catch(err){setErr($('regPwdErr'),'网络错误');}finally{btn.disabled=false;btn.textContent='注册';}
+};
+</script>
+</body>
+</html>
+
