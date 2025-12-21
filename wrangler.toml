@@ -1,9 +1,9 @@
-# 顶部通用信息
-name = "wzz-website"
-compatibility_date = "2025-12-15"
+pages_build_output_dir = "."
 
-# D1 数据库绑定
 [[d1_databases]]
 binding = "DB"
 database_name = "wzz-db"
 database_id = "392def01-1a9b-481c-8768-146b49b1bee2"
+
+[env.production.vars]
+JWT_SECRET = "ReplaceWith32BytesRandomString"

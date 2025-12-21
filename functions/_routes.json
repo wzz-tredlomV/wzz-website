@@ -1,0 +1,10 @@
+[
+  {
+    "pattern": "/api/login",
+    "function": "api/login"
+  },
+  {
+    "pattern": "/api/register",
+    "function": "api/register"
+  }
+]
