@@ -1,8 +1,9 @@
+// 零依赖 JWT 签名
 async function sign(payload, secret) {
   const header = { alg: 'HS256', typ: 'JWT' };
-  const encodedHeader = btoa(JSON.stringify(header)).replace(/=+$/, '');
-  const encodedPayload = btoa(JSON.stringify(payload)).replace(/=+$/, '');
-  const signature = await crypto.subtle.sign(
+  const encHeader = btoa(JSON.stringify(header)).replace(/=+$/, '');
+  const encPayload = btoa(JSON.stringify(payload)).replace(/=+$/, '');
+  const sig = await crypto.subtle.sign(
     'HMAC',
     await crypto.subtle.importKey(
       'raw',
@@ -11,10 +12,10 @@ async function sign(payload, secret) {
       false,
       ['sign']
     ),
-    new TextEncoder().encode(encodedHeader + '.' + encodedPayload)
+    new TextEncoder().encode(encHeader + '.' + encPayload)
   );
-  const encodedSignature = btoa(String.fromCharCode(...new Uint8Array(signature))).replace(/=+$/, '');
-  return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
+  const encSig = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=+$/, '');
+  return `${encHeader}.${encPayload}.${encSig}`;
 }
 
 export default {
