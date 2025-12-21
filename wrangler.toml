@@ -1,5 +1,5 @@
 name = "wzz-website"
-pages_build_output_dir = "."
+compatibility_date = "2025-12-21"
 
 [[d1_databases]]
 binding = "DB"
@@ -7,11 +7,5 @@ database_name = "wzz-db"
 database_id = "392def01-1a9b-481c-8768-146b49b1bee2"
 
 [env.production]
-# 把数据库和变量都补到 production 环境
-[[env.production.d1_databases]]
-binding = "DB"
-database_name = "wzz-db"
-database_id = "392def01-1a9b-481c-8768-146b49b1bee2"
-
 [env.production.vars]
 JWT_SECRET = "ReplaceWith32BytesRandomString"
