@@ -1,5 +1,4 @@
 name = "wzz-website"
-compatibility_date = "2025-12-21"
 
 [[d1_databases]]
 binding = "DB"
