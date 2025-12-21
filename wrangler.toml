@@ -1,5 +1,6 @@
 name = "wzz-website"
-wrangler.toml = "."
+compatibility_date = "2025-12-21"
+pages_build_output_dir = "."
 
 [[d1_databases]]
 binding = "DB"
