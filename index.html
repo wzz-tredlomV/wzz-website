@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Git仓库文件管理器 · 极简版</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        }
+        body {
+            background: linear-gradient(145deg, #0a1929 0%, #0f1e2f 100%);
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .card {
+            max-width: 800px;
+            width: 100%;
+            background: rgba(18, 30, 41, 0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(64, 128, 128, 0.3);
+            border-radius: 28px;
+            padding: 32px;
+            color: #e3f0f0;
+            box-shadow: 0 25px 40px -12px rgba(0,0,0,0.5);
+        }
+        h1 {
+            font-size: 1.8rem;
+            margin-top: 0;
+            margin-bottom: 8px;
+            color: #a5f0e6;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        h1 span {
+            background: #1e4a4a;
+            color: #caf0fe;
+            font-size: 0.9rem;
+            padding: 4px 16px;
+            border-radius: 30px;
+            font-weight: 400;
+        }
+        .desc {
+            color: #b0d4d4;
+            margin-bottom: 28px;
+            border-left: 4px solid #2fafaf;
+            padding-left: 18px;
+            font-size: 0.98rem;
+        }
+        
+        /* 配置面板 */
+        .config-panel {
+            background: #0e1e26;
+            border-radius: 20px;
+            padding: 22px;
+            margin-bottom: 24px;
+            border: 1px solid #2a4a4f;
+        }
+        .config-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #a5e0d0;
+            font-weight: 500;
+            margin-bottom: 18px;
+        }
+        .input-group {
+            margin-bottom: 16px;
+        }
+        label {
+            display: block;
+            font-size: 0.85rem;
+            color: #8fb5b5;
+            margin-bottom: 6px;
+        }
+        input {
+            width: 100%;
+            padding: 12px 16px;
+            background: #0c1a20;
+            border: 1px solid #2f5a5a;
+            border-radius: 14px;
+            color: #eaf4f4;
+            font-size: 0.95rem;
+            transition: 0.15s;
+        }
+        input:focus {
+            outline: none;
+            border-color: #4fc9c9;
+            box-shadow: 0 0 0 2px rgba(79, 201, 201, 0.2);
+        }
+        input::placeholder {
+            color: #537a7a;
+        }
+        
+        .token-note {
+            background: #162b33;
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 0.8rem;
+            color: #afdada;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        
+        /* 上传区 */
+        .upload-area {
+            background: #0e1c22;
+            border-radius: 20px;
+            padding: 28px;
+            border: 2px dashed #2f6f6f;
+            text-align: center;
+            cursor: pointer;
+            margin-bottom: 24px;
+            transition: 0.2s;
+        }
+        .upload-area:hover {
+            border-color: #4fcfcf;
+            background: #11282e;
+        }
+        .upload-icon {
+            font-size: 44px;
+            margin-bottom: 10px;
+        }
+        
+        /* 文件列表 */
+        .file-list {
+            background: #0e1c22;
+            border-radius: 20px;
+            padding: 16px;
+            margin-top: 16px;
+            max-height: 320px;
+            overflow-y: auto;
+        }
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 18px;
+            background: #132a30;
+            border-radius: 16px;
+            margin-bottom: 10px;
+            border: 1px solid #1f464c;
+        }
+        .file-info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            overflow: hidden;
+        }
+        .file-name {
+            font-weight: 500;
+            color: #d6f0f0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 240px;
+        }
+        .file-meta {
+            font-size: 0.75rem;
+            color: #8fb0b0;
+            margin-top: 4px;
+        }
+        .download-btn {
+            background: #1e4a50;
+            border: none;
+            color: white;
+            padding: 8px 18px;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid #2f8f8f;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .download-btn:hover {
+            background: #2f6f77;
+            border-color: #4fcfcf;
+        }
+        
+        .action-buttons {
+            display: flex;
+            gap: 16px;
+            justify-content: flex-end;
+            margin-top: 24px;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 12px 28px;
+            border-radius: 40px;
+            border: 1px solid #2f6f6f;
+            background: transparent;
+            color: #d2f0f0;
+            font-weight: 500;
+            cursor: pointer;
+            transition: 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.95rem;
+        }
+        .btn-primary {
+            background: #1e6a6a;
+            border-color: #3fafaf;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #2f8f8f;
+        }
+        .btn:hover {
+            background: #1e424a;
+        }
+        
+        .status {
+            margin-top: 20px;
+            padding: 14px;
+            border-radius: 16px;
+            background: #0e1a1e;
+            border-left: 6px solid #3fafaf;
+            color: #c0e6e6;
+            font-size: 0.9rem;
+        }
+        
+        .footnote {
+            margin-top: 24px;
+            font-size: 0.8rem;
+            color: #7faaaa;
+            text-align: center;
+            border-top: 1px solid #1f4a4a;
+            padding-top: 20px;
+        }
+        
+        .repo-link {
+            display: inline-block;
+            background: #1e4a50;
+            padding: 8px 20px;
+            border-radius: 30px;
+            color: white;
+            text-decoration: none;
+            margin-top: 10px;
+            border: 1px solid #3fafaf;
+        }
+        .repo-link:hover {
+            background: #2f6f77;
+        }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>
+        📦 Git仓库管理器
+        <span>Cloudflare Pages</span>
+    </h1>
+    <div class="desc">
+        ⚡ 上传文件→保存到Git仓库 · 下载仓库→直接跳转ZIP
+    </div>
+    
+    <!-- GitHub配置面板 -->
+    <div class="config-panel">
+        <div class="config-title">🔧 GitHub 仓库配置</div>
+        <div class="input-group">
+            <label>仓库地址 (owner/repo)</label>
+            <input type="text" id="repoPath" placeholder="例如: wzz-tredlomV/wzz-website" value="wzz-tredlomV/wzz-website">
+        </div>
+        <div class="input-group">
+            <label>GitHub Token (需要repo权限)</label>
+            <input type="password" id="githubToken" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
+            <div class="token-note">
+                🔐 Token仅存储在你的浏览器，永不发送到第三方
+            </div>
+        </div>
+        <div class="input-group">
+            <label>存储路径 (仓库内目录)</label>
+            <input type="text" id="storePath" placeholder="例如: uploads 或留空" value="uploads">
+        </div>
+        <div class="input-group">
+            <label>分支名称</label>
+            <input type="text" id="branchName" placeholder="main" value="main">
+        </div>
+    </div>
+    
+    <!-- 隐藏文件输入 -->
+    <input type="file" id="fileInput" multiple style="display: none">
+    
+    <!-- 上传区域 -->
+    <div class="upload-area" id="uploadTrigger">
+        <div class="upload-icon">📤⬆️</div>
+        <div style="font-size: 1.2rem; margin-bottom: 6px; color: #c0f0f0;">点击或拖拽文件</div>
+        <div style="color: #7fa0a0;">上传后自动保存到Git仓库</div>
+    </div>
+    
+    <!-- 仓库文件列表 -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px;">
+        <h3 style="color: #b0e0e0; margin: 0;">📋 仓库文件</h3>
+        <button class="btn" id="refreshBtn">🔄 刷新列表</button>
+    </div>
+    <div id="fileListContainer" class="file-list">
+        <div style="text-align: center; padding: 30px; color: #7fa0a0;">点击刷新按钮加载仓库文件</div>
+    </div>
+    
+    <!-- 操作按钮 -->
+    <div class="action-buttons">
+        <button class="btn btn-primary" id="downloadRepoBtn">📦 下载完整仓库ZIP</button>
+        <button class="btn" id="saveConfigBtn">💾 保存配置</button>
+    </div>
+    
+    <!-- 状态栏 -->
+    <div id="statusMessage" class="status">
+        ⚡ 就绪，请配置GitHub信息并刷新文件列表
+    </div>
+    
+    <div class="footnote">
+        📍 文件通过Cloudflare Functions操作GitHub API · 下载直接跳转GitHub ZIP
+    </div>
+</div>
+
+<script>
+// ==================== Git仓库操作器 ====================
+class GitRepoManager {
+    constructor() {
+        this.config = this.loadConfig();
+    }
+    
+    // 从localStorage加载配置
+    loadConfig() {
+        try {
+            const saved = localStorage.getItem('gitRepoConfigSimple');
+            if (saved) {
+                const config = JSON.parse(saved);
+                document.getElementById('repoPath').value = config.repo || 'wzz-tredlomV/wzz-website';
+                document.getElementById('githubToken').value = config.token || '';
+                document.getElementById('storePath').value = config.path || 'uploads';
+                document.getElementById('branchName').value = config.branch || 'main';
+                return config;
+            }
+        } catch (e) {}
+        return { 
+            repo: 'wzz-tredlomV/wzz-website', 
+            token: '', 
+            path: 'uploads',
+            branch: 'main'
+        };
+    }
+    
+    // 保存配置到localStorage
+    saveConfig() {
+        const config = {
+            repo: document.getElementById('repoPath').value.trim(),
+            token: document.getElementById('githubToken').value.trim(),
+            path: document.getElementById('storePath').value.trim() || 'uploads',
+            branch: document.getElementById('branchName').value.trim() || 'main'
+        };
+        localStorage.setItem('gitRepoConfigSimple', JSON.stringify(config));
+        this.config = config;
+        return config;
+    }
+    
+    // 获取当前配置
+    getConfig() {
+        return {
+            repo: document.getElementById('repoPath').value.trim(),
+            token: document.getElementById('githubToken').value.trim(),
+            path: document.getElementById('storePath').value.trim() || 'uploads',
+            branch: document.getElementById('branchName').value.trim() || 'main'
+        };
+    }
+    
+    // 上传文件到Git仓库
+    async uploadFile(file) {
+        const config = this.getConfig();
+        if (!config.repo || !config.token) {
+            throw new Error('请填写仓库地址和GitHub Token');
+        }
+        
+        // 构建存储路径
+        const basePath = config.path.replace(/^\/+|\/+$/g, '');
+        const fileName = file.name;
+        const remotePath = basePath ? `${basePath}/${fileName}` : fileName;
+        
+        // 读取文件内容转为Base64
+        const content = await this.fileToBase64(file);
+        const base64Content = content.split(',')[1];
+        
+        // 调用Cloudflare Function API
+        const response = await fetch('/api/github/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                repo: config.repo,
+                token: config.token,
+                path: remotePath,
+                content: base64Content,
+                message: `Upload ${fileName} via Cloudflare Pages`,
+                branch: config.branch
+            })
+        });
+        
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || '上传失败');
+        }
+        return result;
+    }
+    
+    // 获取仓库文件列表
+    async listFiles() {
+        const config = this.getConfig();
+        if (!config.repo || !config.token) {
+            throw new Error('请填写仓库地址和GitHub Token');
+        }
+        
+        const basePath = config.path.replace(/^\/+|\/+$/g, '');
+        
+        const response = await fetch(`/api/github/list?repo=${encodeURIComponent(config.repo)}&token=${encodeURIComponent(config.token)}&path=${encodeURIComponent(basePath)}&branch=${encodeURIComponent(config.branch)}`);
+        const result = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(result.error || '获取列表失败');
+        }
+        return result.files || [];
+    }
+    
+    // 获取仓库ZIP下载链接
+    getRepoZipUrl() {
+        const config = this.getConfig();
+        if (!config.repo) {
+            throw new Error('请填写仓库地址');
+        }
+        // GitHub仓库ZIP下载链接格式
+        return `https://github.com/${config.repo}/archive/refs/heads/${config.branch}.zip`;
+    }
+    
+    // 下载完整仓库（直接跳转）
+    downloadRepoZip() {
+        const url = this.getRepoZipUrl();
+        window.open(url, '_blank');
+        return { success: true, url };
+    }
+    
+    // 辅助：文件转Base64
+    fileToBase64(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = error => reject(error);
+        });
+    }
+}
+
+// ==================== 页面交互 ====================
+const manager = new GitRepoManager();
+const fileInput = document.getElementById('fileInput');
+const uploadTrigger = document.getElementById('uploadTrigger');
+const fileListContainer = document.getElementById('fileListContainer');
+const statusEl = document.getElementById('statusMessage');
+
+// 更新状态
+function setStatus(msg, isError = false) {
+    statusEl.innerHTML = msg;
+    statusEl.style.borderLeftColor = isError ? '#cf6f6f' : '#3fafaf';
+}
+
+// 渲染文件列表
+async function refreshFileList() {
+    try {
+        setStatus('🔄 正在加载仓库文件列表...');
+        const files = await manager.listFiles();
+        
+        if (files.length === 0) {
+            fileListContainer.innerHTML = '<div style="text-align: center; padding: 30px; color: #7fa0a0;">📭 仓库目录为空</div>';
+            setStatus('✅ 仓库目录为空，可以上传文件');
+            return;
+        }
+        
+        let html = '';
+        files.forEach(file => {
+            const size = file.size ? formatFileSize(file.size) : '--';
+            const name = file.name || file.path.split('/').pop();
+            html += `
+                <div class="file-item">
+                    <div class="file-info">
+                        <span style="font-size: 24px;">📄</span>
+                        <div class="file-details">
+                            <div class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+                            <div class="file-meta">${size}</div>
+                        </div>
+                    </div>
+                    <span class="download-btn" style="opacity: 0.8; background: #2a4a4a;">
+                        ✅ 已上传
+                    </span>
+                </div>
+            `;
+        });
+        
+        fileListContainer.innerHTML = html;
+        setStatus(`✅ 已加载 ${files.length} 个文件`);
+    } catch (error) {
+        fileListContainer.innerHTML = '<div style="text-align: center; padding: 30px; color: #cf8f8f;">❌ 加载失败: ' + escapeHtml(error.message) + '</div>';
+        setStatus('❌ ' + error.message, true);
+    }
+}
+
+// 上传文件处理
+async function handleUpload(files) {
+    if (!files || files.length === 0) return;
+    
+    try {
+        setStatus(`📤 正在上传 ${files.length} 个文件到Git仓库...`);
+        
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            await manager.uploadFile(file);
+            setStatus(`📤 已上传 ${i+1}/${files.length}: ${file.name}`);
+        }
+        
+        setStatus(`✅ 成功上传 ${files.length} 个文件`);
+        await refreshFileList();
+    } catch (error) {
+        setStatus('❌ 上传失败: ' + error.message, true);
+    }
+}
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+// 防XSS
+function escapeHtml(unsafe) {
+    if (!unsafe) return '';
+    return String(unsafe)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+// ==================== 事件绑定 ====================
+uploadTrigger.addEventListener('click', () => fileInput.click());
+
+uploadTrigger.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    uploadTrigger.style.background = '#144048';
+});
+
+uploadTrigger.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    uploadTrigger.style.background = '#0e1c22';
+});
+
+uploadTrigger.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadTrigger.style.background = '#0e1c22';
+    handleUpload(e.dataTransfer.files);
+});
+
+fileInput.addEventListener('change', (e) => {
+    handleUpload(e.target.files);
+    fileInput.value = '';
+});
+
+// 刷新按钮
+document.getElementById('refreshBtn').addEventListener('click', refreshFileList);
+
+// 下载完整仓库ZIP
+document.getElementById('downloadRepoBtn').addEventListener('click', () => {
+    try {
+        const config = manager.getConfig();
+        if (!config.repo) {
+            setStatus('❌ 请填写仓库地址', true);
+            return;
+        }
+        const url = manager.getRepoZipUrl();
+        setStatus(`📦 正在跳转下载: ${config.repo} ZIP包`);
+        manager.downloadRepoZip();
+    } catch (error) {
+        setStatus('❌ ' + error.message, true);
+    }
+});
+
+// 保存配置
+document.getElementById('saveConfigBtn').addEventListener('click', () => {
+    manager.saveConfig();
+    setStatus('💾 配置已保存到浏览器');
+});
+
+// 初始化
+document.addEventListener('DOMContentLoaded', () => {
+    manager.loadConfig();
+});
+
+// 防止页面拖拽打开文件
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
+</script>
+</body>
+</html>
