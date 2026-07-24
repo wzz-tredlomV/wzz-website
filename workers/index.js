@@ -1,27 +1,53 @@
 /**
- * Hugging Face 代理服务 - 终极版 v3.0
- * 支持: huggingface.co / hf.co / huggingface.space / Gradio Space API
- * 功能: 全站代理、Gradio Space 代理、WebSocket、SSE、URL 重写
+ * Hugging Face 代理服务 — 终极版 v4.0
+ * 支持: huggingface.co / hf.co / huggingface.space / Gradio Space / 全子域名代理
+ * 功能: 全站代理、Gradio Space 代理、WebSocket、SSE、URL 重写、Cookie 重写、OAuth 支持
  */
 
-const TARGET_HOSTS = {
-  'huggingface.co': true,
-  'hf.co': true,
-  'huggingface.space': true,
-  'cdn.huggingface.co': true,
-  'datasets-server.huggingface.co': true,
-  'ui.endpoints.huggingface.co': true,
-};
+// ===== 域名判断 =====
+// 判断是否为 Hugging Face 相关域名（包括所有子域名）
+function isHfDomain(hostname) {
+  const hfDomains = [
+    'huggingface.co',
+    'hf.co',
+    'huggingface.space',
+  ];
+  for (const domain of hfDomains) {
+    if (hostname === domain || hostname.endsWith('.' + domain)) return true;
+  }
+  return false;
+}
+
+// 判断是否为 Space 子域名 (user-space.hf.space)
+function isSpaceDomain(hostname) {
+  return hostname.endsWith('.hf.space');
+}
+
+// 从 Space 子域名解析用户和空间名
+function parseSpaceSubdomain(hostname) {
+  const base = hostname.replace(/\.hf\.space$/, '');
+  const parts = base.split('-');
+  if (parts.length < 2) return null;
+  if (parts.length === 2) {
+    return { user: parts[0], space: parts[1] };
+  }
+  return { user: parts.slice(0, -1).join('-'), space: parts[parts.length - 1] };
+}
+
+// 获取 Space 子域名
+function getSpaceSubdomain(user, space) {
+  return `${user}-${space}.hf.space`;
+}
 
 // ===== CORS =====
 function getCorsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, X-CSRF-Token, Cache-Control, X-Api-Key, X-Api-Secret, X-Gradio-Event-Id, X-Gradio-Request-Id, Gradio-Client-Hash',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, X-CSRF-Token, Cache-Control, X-Api-Key, X-Api-Secret, X-Gradio-Event-Id, X-Gradio-Request-Id, Gradio-Client-Hash, Cookie',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Max-Age': '86400',
-    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, X-Request-Id, X-Cache-Status, X-Cache-Hits, X-Gradio-Event-Id, X-Gradio-Request-Id',
+    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, X-Request-Id, X-Cache-Status, X-Cache-Hits, X-Gradio-Event-Id, X-Gradio-Request-Id, Set-Cookie',
   };
 }
 
@@ -35,16 +61,23 @@ function makeTargetUrl(originalUrl, targetHost, pathname) {
 }
 
 // ===== 请求头处理 =====
-function buildProxyHeaders(request, targetHost) {
+function buildProxyHeaders(request, targetHost, proxyHost) {
   const h = new Headers(request.headers);
   h.set('Host', targetHost);
   h.delete('Referer');
   h.set('Referer', `https://${targetHost}/`);
+  h.delete('Origin');
+  h.set('Origin', `https://${targetHost}`);
   h.delete('CF-Connecting-IP');
   h.delete('CF-Visitor');
   h.delete('CF-Ray');
   h.delete('CF-Worker');
-  h.set('Origin', `https://${targetHost}`);
+  h.delete('CF-IPCountry');
+  h.delete('CF-Request-ID');
+  h.set('X-Forwarded-Host', proxyHost);
+  h.set('X-Forwarded-Proto', 'https');
+  const realIp = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For');
+  if (realIp) h.set('X-Forwarded-For', realIp);
   return h;
 }
 
@@ -53,10 +86,6 @@ function parseSpacePath(pathname) {
   const m = pathname.match(/^\/spaces\/([^\/]+)\/([^\/]+)(.*)$/);
   if (!m) return null;
   return { user: m[1], space: m[2], rest: m[3] || '' };
-}
-
-function getSpaceSubdomain(user, space) {
-  return `${user}-${space}.hf.space`;
 }
 
 // ===== 判断是否为 Gradio 后端路径 =====
@@ -88,14 +117,12 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
   const prefix = `/spaces/${user}/${space}`;
   const subdomain = getSpaceSubdomain(user, space);
 
-  // 1. 绝对路径: https://user-space.hf.space/xxx -> https://proxy/spaces/user/space/xxx
   const absRe = new RegExp(
     `https?://${subdomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
     'g'
   );
   text = text.replace(absRe, `https://${proxyHost}${prefix}`);
 
-  // 2. 相对路径重写
   const rewrites = [
     { from: '/gradio_api/', to: `${prefix}/gradio_api/` },
     { from: '/assets/', to: `${prefix}/assets/` },
@@ -109,13 +136,12 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
 
   for (const rw of rewrites) {
     const pattern = new RegExp(
-      `(["'\\s]|^)${rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`,
+      `(["'\s]|^)${rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`,
       'g'
     );
     text = text.replace(pattern, `$1${rw.to}`);
   }
 
-  // 3. 精确匹配路径
   const exactPaths = [
     { from: '/config', to: `${prefix}/config` },
     { from: '/upload', to: `${prefix}/upload` },
@@ -132,7 +158,7 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
 
   for (const rw of exactPaths) {
     const pattern = new RegExp(
-      `(["'\\s]|^)${rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?=["'\\s?&/\\n]|$)`,
+      `(["'\s]|^)${rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?=["'\s?&/\n]|$)`,
       'g'
     );
     text = text.replace(pattern, `$1${rw.to}`);
@@ -161,9 +187,36 @@ function rewriteHfCoSpaceContent(text, proxyHost, user, space) {
   return text;
 }
 
+// ===== 全局 URL 重写：重写所有 Hugging Face 域名为代理域名 =====
+function rewriteAllHfDomains(text, proxyHost) {
+  if (!text || typeof text !== 'string') return text;
+  const domainMappings = [
+    { from: 'huggingface.co', to: proxyHost },
+    { from: 'hf.co', to: proxyHost },
+    { from: 'huggingface.space', to: proxyHost },
+  ];
+  for (const mapping of domainMappings) {
+    const pattern = new RegExp(
+      `https?://${mapping.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+      'g'
+    );
+    text = text.replace(pattern, `https://${mapping.to}`);
+  }
+  return text;
+}
+
+// ===== 重写 Set-Cookie 中的 Domain =====
+function rewriteSetCookie(headerValue, proxyHost) {
+  if (!headerValue) return headerValue;
+  return headerValue.replace(
+    /Domain=[.]?[^;]+/gi,
+    `Domain=${proxyHost}`
+  );
+}
+
 // ===== 核心代理函数 =====
 async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn) {
-  const proxyHeaders = buildProxyHeaders(request, targetHost);
+  const proxyHeaders = buildProxyHeaders(request, targetHost, proxyHost);
   const origin = request.headers.get('Origin') || '*';
 
   try {
@@ -178,29 +231,56 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
     const respHeaders = new Headers(response.headers);
     Object.entries(getCorsHeaders(origin)).forEach(([k, v]) => respHeaders.set(k, v));
 
-    // 处理重定向
+    const setCookie = respHeaders.get('Set-Cookie');
+    if (setCookie) {
+      respHeaders.set('Set-Cookie', rewriteSetCookie(setCookie, proxyHost));
+    }
+    if (respHeaders.getAll) {
+      const cookies = respHeaders.getAll('Set-Cookie');
+      if (cookies && cookies.length > 1) {
+        respHeaders.delete('Set-Cookie');
+        for (const cookie of cookies) {
+          respHeaders.append('Set-Cookie', rewriteSetCookie(cookie, proxyHost));
+        }
+      }
+    }
+
     if (response.status >= 300 && response.status < 400) {
       const loc = respHeaders.get('Location');
       if (loc) {
         try {
-          const locUrl = new URL(loc);
-          if (TARGET_HOSTS[locUrl.hostname] || locUrl.hostname.endsWith('.hf.space')) {
-            if (locUrl.hostname.endsWith('.hf.space')) {
-              const parts = locUrl.hostname.replace('.hf.space', '').split('-');
-              if (parts.length >= 2) {
-                locUrl.pathname = `/spaces/${parts[0]}/${parts[1]}${locUrl.pathname}`;
+          const locUrl = new URL(loc, targetUrl);
+          if (isHfDomain(locUrl.hostname)) {
+            if (isSpaceDomain(locUrl.hostname)) {
+              const spaceInfo = parseSpaceSubdomain(locUrl.hostname);
+              if (spaceInfo) {
+                locUrl.pathname = `/spaces/${spaceInfo.user}/${spaceInfo.space}${locUrl.pathname}`;
               }
             }
             locUrl.hostname = proxyHost;
             locUrl.protocol = 'https';
             respHeaders.set('Location', locUrl.toString());
           }
-        } catch (e) {}
+        } catch (e) {
+          if (loc.startsWith('http')) {
+            for (const domain of ['huggingface.co', 'hf.co', 'huggingface.space']) {
+              if (loc.includes(domain)) {
+                const newLoc = loc.replace(/https?:\/\/[^\/]+/, `https://${proxyHost}`);
+                respHeaders.set('Location', newLoc);
+                break;
+              }
+            }
+          }
+        }
       }
     }
 
     respHeaders.delete('Content-Security-Policy');
     respHeaders.delete('X-Frame-Options');
+    respHeaders.delete('Strict-Transport-Security');
+    respHeaders.delete('Expect-CT');
+    respHeaders.delete('Report-To');
+    respHeaders.delete('NEL');
 
     const ct = respHeaders.get('Content-Type') || '';
     const isText = ct.includes('text/') ||
@@ -298,26 +378,22 @@ async function handleRequest(request, env) {
   const proxyHost = url.hostname;
   const origin = request.headers.get('Origin') || '*';
 
-  // CORS 预检
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: getCorsHeaders(origin) });
   }
 
-  // 根路径
   if (pathname === '/' || pathname === '/index.html') {
     return serveFrontend(url.origin);
   }
 
-  // 健康检查
   if (pathname === '/health') {
     return jsonResponse({ status: 'ok', timestamp: new Date().toISOString() });
   }
 
-  // API 信息
   if (pathname === '/api/info') {
     return jsonResponse({
       name: 'Hugging Face Proxy',
-      version: '3.0.0',
+      version: '4.0.0',
       endpoints: {
         models: '/models/*',
         datasets: '/datasets/*',
@@ -325,6 +401,10 @@ async function handleRequest(request, env) {
         gradio_api: '/spaces/<user>/<space>/gradio_api/*',
         api: '/api/*',
         inference: '/pipeline/*',
+        login: '/login',
+        join: '/join',
+        oauth: '/oauth/*',
+        settings: '/settings/*',
       },
       features: [
         'Model/Dataset download',
@@ -333,34 +413,32 @@ async function handleRequest(request, env) {
         'WebSocket support',
         'SSE streaming',
         'Smart URL rewriting',
+        'Cookie Domain rewriting',
+        'OAuth/Login support',
+        'All HF subdomains proxy',
       ],
     });
   }
 
-  // ===== Space 代理 =====
   const spaceInfo = parseSpacePath(pathname);
 
   if (spaceInfo) {
     const { user, space, rest } = spaceInfo;
     const subdomain = getSpaceSubdomain(user, space);
 
-    // WebSocket 升级
     const upgrade = request.headers.get('Upgrade');
     if (upgrade === 'websocket') {
       const targetWsUrl = `wss://${subdomain}${rest}${url.search}`;
       return proxyWebSocket(request, targetWsUrl);
     }
 
-    // 判断走哪个后端
     if (isGradioBackend(rest)) {
-      // Gradio 后端 API -> hf.space 子域名，去掉 /spaces/user/space 前缀
       const targetUrl = makeTargetUrl(request.url, subdomain, rest);
       return proxyRequest(
         request, targetUrl, subdomain, proxyHost,
         (text) => rewriteHfSpaceContent(text, proxyHost, user, space)
       );
     } else {
-      // Space 页面和其他资源 -> huggingface.co，保持原路径
       const targetUrl = makeTargetUrl(request.url, 'huggingface.co');
       return proxyRequest(
         request, targetUrl, 'huggingface.co', proxyHost,
@@ -369,14 +447,17 @@ async function handleRequest(request, env) {
     }
   }
 
-  // ===== 标准 Hugging Face 代理 =====
   let targetHost = 'huggingface.co';
   if (pathname.startsWith('/api/datasets/')) {
     targetHost = 'datasets-server.huggingface.co';
+  } else if (pathname.startsWith('/api/inference/') || pathname.startsWith('/pipeline/')) {
+    targetHost = 'api-inference.huggingface.co';
+  } else if (pathname.startsWith('/cdn/') || pathname.startsWith('/cdn-lfs/')) {
+    targetHost = 'cdn-lfs.huggingface.co';
   }
 
   const targetUrl = makeTargetUrl(request.url, targetHost);
-  return proxyRequest(request, targetUrl, targetHost, proxyHost, null);
+  return proxyRequest(request, targetUrl, targetHost, proxyHost, (text) => rewriteAllHfDomains(text, proxyHost));
 }
 
 // ===== 前端界面 =====
@@ -386,7 +467,7 @@ function serveFrontend(domain) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Hugging Face 代理</title>
+  <title>Hugging Face 代理 v4.0</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
@@ -394,6 +475,7 @@ function serveFrontend(domain) {
       --text: #f1f5f9; --text-muted: #94a3b8;
       --accent: #f59e0b; --accent-light: #fbbf24;
       --border: #334155; --success: #10b981; --error: #ef4444; --gradio: #ff6b6b;
+      --info: #3b82f6; --warning: #f59e0b;
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -435,6 +517,8 @@ function serveFrontend(domain) {
     button.secondary:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
     button.gradio { background: linear-gradient(135deg, var(--gradio), #ee5a5a); }
     button.gradio:hover { box-shadow: 0 4px 12px rgba(255,107,107,0.3); }
+    button.info { background: linear-gradient(135deg, var(--info), #2563eb); }
+    button.info:hover { box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
     .url-display {
       background: var(--bg); padding: 1rem; border-radius: 0.5rem;
       font-family: 'Courier New', monospace; font-size: 0.9rem; word-break: break-all;
@@ -473,6 +557,10 @@ function serveFrontend(domain) {
     .toast.show { transform: translateY(0); opacity: 1; }
     .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 1rem; font-size: 0.8rem; font-weight: 600; margin-left: 0.5rem; }
     .badge-new { background: var(--gradio); color: white; }
+    .badge-v4 { background: var(--info); color: white; }
+    .changelog { background: var(--bg); padding: 1rem; border-radius: 0.5rem; margin-top: 1rem; }
+    .changelog li { color: var(--text-muted); margin: 0.5rem 0; }
+    .changelog li strong { color: var(--accent-light); }
     @media (max-width: 768px) {
       .container { padding: 1rem; } h1 { font-size: 1.8rem; }
       .input-group { flex-direction: column; } .grid { grid-template-columns: 1fr; }
@@ -484,13 +572,23 @@ function serveFrontend(domain) {
   <div class="container">
     <header>
       <div class="logo">🤗</div>
-      <h1>Hugging Face 代理</h1>
+      <h1>Hugging Face 代理 <span class="badge badge-v4">v4.0</span></h1>
       <p class="subtitle">加速访问 Hugging Face 模型、数据集、Spaces 和 Gradio API</p>
       <div class="status-badge">
         <span class="status-dot"></span>
         <span id="statusText">服务运行中</span>
       </div>
     </header>
+
+    <div class="card">
+      <h2>🚀 更新日志</h2>
+      <ul class="changelog">
+        <li><strong>v4.0</strong> — 全面修复 Login/Signup/OAuth 支持，重写所有 HF 域名，Cookie Domain 重写</li>
+        <li><strong>v3.0</strong> — 重写代理逻辑，修复 Space 页面 404，支持 Gradio Space 完整代理</li>
+        <li><strong>v2.0</strong> — 添加 WebSocket、SSE 流式传输支持</li>
+        <li><strong>v1.0</strong> — 初始版本，基础 Hugging Face 代理</li>
+      </ul>
+    </div>
 
     <div class="card">
       <h2>🔗 快速访问</h2>
@@ -509,6 +607,22 @@ function serveFrontend(domain) {
       <div class="url-display" id="urlDisplay">
         <span id="generatedUrl">${domain}/models/bert-base-chinese</span>
         <button class="copy-btn secondary" onclick="copyGeneratedUrl()">复制</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>🔐 登录 / 注册</h2>
+      <p style="color: var(--text-muted); margin-bottom: 1rem;">
+        通过代理直接访问 Hugging Face 的登录和注册页面。支持 OAuth、SSO 和常规账号密码登录。
+      </p>
+      <div class="input-group">
+        <button class="info" onclick="window.open('${domain}/login', '_blank')">🔑 登录 (Login)</button>
+        <button class="info" onclick="window.open('${domain}/join', '_blank')">✨ 注册 (Sign Up)</button>
+        <button class="secondary" onclick="window.open('${domain}/settings/profile', '_blank')">⚙️ 设置</button>
+      </div>
+      <div class="url-display">
+        <span>${domain}/login</span>
+        <button class="copy-btn secondary" onclick="navigator.clipboard.writeText('${domain}/login');showToast('登录链接已复制！')">复制</button>
       </div>
     </div>
 
@@ -547,6 +661,7 @@ function serveFrontend(domain) {
         <button class="tab" onclick="switchTab('js')">JavaScript</button>
         <button class="tab" onclick="switchTab('git')">Git</button>
         <button class="tab" onclick="switchTab('gradio')">Gradio Client</button>
+        <button class="tab" onclick="switchTab('login')">Login/OAuth</button>
       </div>
       <div id="python" class="tab-content active">
         <div class="code-block">
@@ -579,13 +694,13 @@ file_path = hf_hub_download(
 curl -L <span class="string">"${domain}/bert-base-chinese/resolve/main/config.json"</span>
 
 <span class="comment"># 调用 Inference API</span>
-curl -X POST <span class="string">"${domain}/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"</span> \\
-  -H <span class="string">"Content-Type: application/json"</span> \\
+curl -X POST <span class="string">"${domain}/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"</span> \
+  -H <span class="string">"Content-Type: application/json"</span> \
   -d <span class="string">'{"inputs": "Hello world"}'</span>
 
 <span class="comment"># 调用 Gradio Space API</span>
-curl -X POST <span class="string">"${domain}/spaces/username/space-name/gradio_api/call/predict"</span> \\
-  -H <span class="string">"Content-Type: application/json"</span> \\
+curl -X POST <span class="string">"${domain}/spaces/username/space-name/gradio_api/call/predict"</span> \
+  -H <span class="string">"Content-Type: application/json"</span> \
   -d <span class="string">'{"data": ["Hello"]}'</span>
         </div>
       </div>
@@ -644,6 +759,26 @@ job = client.submit(<span class="string">"Hello"</span>, api_name=<span class="s
     print(output)
         </div>
       </div>
+      <div id="login" class="tab-content">
+        <div class="code-block">
+<span class="comment"># 通过代理登录 Hugging Face</span>
+<span class="comment"># 1. 浏览器直接访问代理的登录页面</span>
+<span class="string">"${domain}/login"</span>
+
+<span class="comment"># 2. 使用 huggingface-cli 登录（通过代理）</span>
+<span class="keyword">export</span> HF_ENDPOINT=${domain}
+huggingface-cli login
+
+<span class="comment"># 3. 使用 Python 登录（通过代理）</span>
+<span class="keyword">from</span> huggingface_hub <span class="keyword">import</span> login
+<span class="keyword">import</span> os
+os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"${domain}"</span>
+login()
+
+<span class="comment"># 4. OAuth 授权回调（代理自动处理 redirect_uri）</span>
+<span class="comment"># 所有 OAuth 重定向和回调 URL 都会被自动重写为代理域名</span>
+        </div>
+      </div>
     </div>
 
     <div class="grid">
@@ -663,19 +798,19 @@ job = client.submit(<span class="string">"Hello"</span>, api_name=<span class="s
         <p>支持代理 Gradio Space 的完整功能，包括 WebSocket、SSE 流式传输和文件上传。</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">📦</div>
-        <h3>模型下载</h3>
-        <p>支持 transformers、huggingface_hub、git-lfs 等多种下载方式。</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔒</div>
-        <h3>安全可靠</h3>
-        <p>纯代理转发，不存储任何数据。支持 HTTPS 加密传输。</p>
+        <div class="feature-icon">🔐</div>
+        <h3>登录 / OAuth 支持 <span class="badge badge-v4">v4.0</span></h3>
+        <p>完整支持 Hugging Face 登录、注册、OAuth 授权流程，Cookie Domain 自动重写。</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🌐</div>
-        <h3>CORS 支持</h3>
-        <p>完整的跨域支持，可直接在浏览器前端调用 API。</p>
+        <h3>全子域名代理 <span class="badge badge-v4">v4.0</span></h3>
+        <p>自动代理所有 Hugging Face 子域名，包括 cdn-lfs、api-inference、datasets-server 等。</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🍪</div>
+        <h3>Cookie 重写 <span class="badge badge-v4">v4.0</span></h3>
+        <p>自动重写 Set-Cookie 中的 Domain 属性，确保登录态在代理域名下正常工作。</p>
       </div>
     </div>
 
@@ -690,9 +825,15 @@ job = client.submit(<span class="string">"Hello"</span>, api_name=<span class="s
 /spaces/&lt;user&gt;/&lt;space&gt;/queue/*                 <span class="comment"># 队列 (WebSocket)</span>
 /api/models/&lt;model-id&gt;                          <span class="comment"># 模型 API</span>
 /api/datasets/&lt;dataset-id&gt;                      <span class="comment"># 数据集 API</span>
+/api/inference/*                                 <span class="comment"># 推理 API (v4.0)</span>
+/cdn-lfs/*                                       <span class="comment"># LFS 文件下载 (v4.0)</span>
 /&lt;model-id&gt;/resolve/main/&lt;file&gt;                <span class="comment"># 下载文件</span>
 /&lt;model-id&gt;/blob/main/&lt;file&gt;                   <span class="comment"># 查看文件</span>
 /pipeline/&lt;task&gt;/&lt;model-id&gt;                  <span class="comment"># 推理 API</span>
+/login                                           <span class="comment"># 登录 (v4.0)</span>
+/join                                            <span class="comment"># 注册 (v4.0)</span>
+/oauth/*                                         <span class="comment"># OAuth (v4.0)</span>
+/settings/*                                      <span class="comment"># 用户设置 (v4.0)</span>
       </div>
     </div>
   </div>
