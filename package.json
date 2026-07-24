@@ -1,0 +1,23 @@
+{
+  "name": "hf-proxy",
+  "version": "1.0.0",
+  "description": "Hugging Face 代理服务 - 基于 Cloudflare Workers",
+  "main": "workers/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "keywords": [
+    "huggingface",
+    "proxy",
+    "cloudflare-workers",
+    "ai",
+    "ml"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
