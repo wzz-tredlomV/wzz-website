@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的简单网页</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #333;
+        }
+
+        .card {
+            background: white;
+            padding: 40px 50px;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+            animation: fadeInUp 0.8s ease;
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .avatar {
+            width: 100px;
+            height: 100px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border-radius: 50%;
+            margin: 0 auto 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 48px;
+            color: white;
+        }
+
+        h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 14px;
+            margin-bottom: 25px;
+        }
+
+        .info {
+            text-align: left;
+            margin: 20px 0;
+        }
+
+        .info-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .info-item:last-child {
+            border-bottom: none;
+        }
+
+        .info-item .icon {
+            width: 36px;
+            height: 36px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
+            font-size: 18px;
+        }
+
+        .info-item .text {
+            flex: 1;
+        }
+
+        .info-item .label {
+            font-size: 12px;
+            color: #999;
+        }
+
+        .info-item .value {
+            font-size: 15px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        .btn {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 40px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            text-decoration: none;
+            border-radius: 25px;
+            font-size: 15px;
+            transition: transform 0.3s, box-shadow 0.3s;
+            border: none;
+            cursor: pointer;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+
+        .time {
+            margin-top: 20px;
+            font-size: 13px;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="avatar">👋</div>
+        <h1>你好，世界！</h1>
+        <p class="subtitle">Welcome to my simple webpage</p>
+        
+        <div class="info">
+            <div class="info-item">
+                <div class="icon">📅</div>
+                <div class="text">
+                    <div class="label">日期</div>
+                    <div class="value" id="date">加载中...</div>
+                </div>
+            </div>
+            <div class="info-item">
+                <div class="icon">⏰</div>
+                <div class="text">
+                    <div class="label">时间</div>
+                    <div class="value" id="time">加载中...</div>
+                </div>
+            </div>
+            <div class="info-item">
+                <div class="icon">🌐</div>
+                <div class="text">
+                    <div class="label">浏览器</div>
+                    <div class="value" id="browser">检测中...</div>
+                </div>
+            </div>
+        </div>
+        
+        <button class="btn" onclick="sayHello()">点击问候</button>
+        
+        <p class="time">页面加载完成</p>
+    </div>
+
+    <script>
+        // 更新日期时间
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('date').textContent = now.toLocaleDateString('zh-CN');
+            document.getElementById('time').textContent = now.toLocaleTimeString('zh-CN');
+        }
+        
+        updateTime();
+        setInterval(updateTime, 1000);
+
+        // 检测浏览器
+        const ua = navigator.userAgent;
+        let browserName = '未知浏览器';
+        if (ua.includes('Chrome')) browserName = 'Chrome';
+        else if (ua.includes('Firefox')) browserName = 'Firefox';
+        else if (ua.includes('Safari')) browserName = 'Safari';
+        else if (ua.includes('Edge')) browserName = 'Edge';
+        document.getElementById('browser').textContent = browserName;
+
+        // 问候功能
+        function sayHello() {
+            const hour = new Date().getHours();
+            let greeting = '你好';
+            if (hour < 12) greeting = '早上好';
+            else if (hour < 18) greeting = '下午好';
+            else greeting = '晚上好';
+            
+            alert(greeting + '！感谢访问这个简单网页 😊');
+        }
+    </script>
+</body>
+</html>
