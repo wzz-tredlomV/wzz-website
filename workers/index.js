@@ -1,40 +1,29 @@
 /**
- * Hugging Face 代理服务 — 终极版 v4.0
- * 支持: huggingface.co / hf.co / huggingface.space / Gradio Space / 全子域名代理
- * 功能: 全站代理、Gradio Space 代理、WebSocket、SSE、URL 重写、Cookie 重写、OAuth 支持
+ * Hugging Face 代理服务 — 终极版 v4.1
+ * 修复: POST 302 重定向、Cookie 重写、登录流程、全子域名代理
  */
 
 // ===== 域名判断 =====
-// 判断是否为 Hugging Face 相关域名（包括所有子域名）
 function isHfDomain(hostname) {
-  const hfDomains = [
-    'huggingface.co',
-    'hf.co',
-    'huggingface.space',
-  ];
+  const hfDomains = ['huggingface.co', 'hf.co', 'huggingface.space'];
   for (const domain of hfDomains) {
     if (hostname === domain || hostname.endsWith('.' + domain)) return true;
   }
   return false;
 }
 
-// 判断是否为 Space 子域名 (user-space.hf.space)
 function isSpaceDomain(hostname) {
   return hostname.endsWith('.hf.space');
 }
 
-// 从 Space 子域名解析用户和空间名
 function parseSpaceSubdomain(hostname) {
   const base = hostname.replace(/\.hf\.space$/, '');
   const parts = base.split('-');
   if (parts.length < 2) return null;
-  if (parts.length === 2) {
-    return { user: parts[0], space: parts[1] };
-  }
+  if (parts.length === 2) return { user: parts[0], space: parts[1] };
   return { user: parts.slice(0, -1).join('-'), space: parts[parts.length - 1] };
 }
 
-// 获取 Space 子域名
 function getSpaceSubdomain(user, space) {
   return `${user}-${space}.hf.space`;
 }
@@ -44,7 +33,7 @@ function getCorsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, X-CSRF-Token, Cache-Control, X-Api-Key, X-Api-Secret, X-Gradio-Event-Id, X-Gradio-Request-Id, Gradio-Client-Hash, Cookie',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, X-CSRF-Token, Cache-Control, X-Api-Key, X-Api-Secret, X-Gradio-Event-Id, X-Gradio-Request-Id, Gradio-Client-Hash, Cookie, X-Requested-With',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Max-Age': '86400',
     'Access-Control-Expose-Headers': 'Content-Length, Content-Range, X-Request-Id, X-Cache-Status, X-Cache-Hits, X-Gradio-Event-Id, X-Gradio-Request-Id, Set-Cookie',
@@ -208,10 +197,12 @@ function rewriteAllHfDomains(text, proxyHost) {
 // ===== 重写 Set-Cookie 中的 Domain =====
 function rewriteSetCookie(headerValue, proxyHost) {
   if (!headerValue) return headerValue;
-  return headerValue.replace(
-    /Domain=[.]?[^;]+/gi,
-    `Domain=${proxyHost}`
-  );
+  // 重写 Domain
+  let result = headerValue.replace(/Domain=[.]?[^;]+/gi, `Domain=${proxyHost}`);
+  // 删除 Secure 标志（如果代理不是 HTTPS）或保留
+  // 删除 SameSite=Strict 改为 SameSite=None（跨域场景）
+  // 但保留 Secure 以确保 HTTPS 下 Cookie 正常工作
+  return result;
 }
 
 // ===== 核心代理函数 =====
@@ -231,26 +222,32 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
     const respHeaders = new Headers(response.headers);
     Object.entries(getCorsHeaders(origin)).forEach(([k, v]) => respHeaders.set(k, v));
 
-    const setCookie = respHeaders.get('Set-Cookie');
-    if (setCookie) {
-      respHeaders.set('Set-Cookie', rewriteSetCookie(setCookie, proxyHost));
-    }
+    // ===== Cookie 重写（关键修复）=====
+    // Cloudflare Workers 的 Headers 支持 getAll 方法获取多个同名头部
     if (respHeaders.getAll) {
       const cookies = respHeaders.getAll('Set-Cookie');
-      if (cookies && cookies.length > 1) {
+      if (cookies && cookies.length > 0) {
         respHeaders.delete('Set-Cookie');
         for (const cookie of cookies) {
           respHeaders.append('Set-Cookie', rewriteSetCookie(cookie, proxyHost));
         }
       }
+    } else {
+      // 备用方案：尝试获取单个 Set-Cookie
+      const setCookie = respHeaders.get('Set-Cookie');
+      if (setCookie) {
+        respHeaders.set('Set-Cookie', rewriteSetCookie(setCookie, proxyHost));
+      }
     }
 
+    // ===== 重定向处理（关键修复）=====
     if (response.status >= 300 && response.status < 400) {
       const loc = respHeaders.get('Location');
       if (loc) {
         try {
           const locUrl = new URL(loc, targetUrl);
           if (isHfDomain(locUrl.hostname)) {
+            // Space 子域名重定向
             if (isSpaceDomain(locUrl.hostname)) {
               const spaceInfo = parseSpaceSubdomain(locUrl.hostname);
               if (spaceInfo) {
@@ -262,6 +259,7 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
             respHeaders.set('Location', locUrl.toString());
           }
         } catch (e) {
+          // 相对路径或其他无法解析的 URL
           if (loc.startsWith('http')) {
             for (const domain of ['huggingface.co', 'hf.co', 'huggingface.space']) {
               if (loc.includes(domain)) {
@@ -275,6 +273,14 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
       }
     }
 
+    // ===== POST 302 -> 303 转换（关键修复）=====
+    // 防止浏览器在跟随重定向时保持 POST 方法，导致"重新发送数据"弹窗
+    let finalStatus = response.status;
+    if (request.method === 'POST' && response.status === 302) {
+      finalStatus = 303; // See Other: 明确将 POST 转为 GET
+    }
+
+    // 删除可能干扰代理的安全头部
     respHeaders.delete('Content-Security-Policy');
     respHeaders.delete('X-Frame-Options');
     respHeaders.delete('Strict-Transport-Security');
@@ -300,14 +306,14 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
       const rewritten = rewriteFn(text);
       respHeaders.delete('Content-Length');
       return new Response(rewritten, {
-        status: response.status,
+        status: finalStatus,
         statusText: response.statusText,
         headers: respHeaders,
       });
     }
 
     return new Response(response.body, {
-      status: response.status,
+      status: finalStatus,
       statusText: response.statusText,
       headers: respHeaders,
     });
@@ -378,22 +384,26 @@ async function handleRequest(request, env) {
   const proxyHost = url.hostname;
   const origin = request.headers.get('Origin') || '*';
 
+  // CORS 预检
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: getCorsHeaders(origin) });
   }
 
+  // 根路径 - 返回前端页面
   if (pathname === '/' || pathname === '/index.html') {
     return serveFrontend(url.origin);
   }
 
+  // 健康检查
   if (pathname === '/health') {
     return jsonResponse({ status: 'ok', timestamp: new Date().toISOString() });
   }
 
+  // API 信息
   if (pathname === '/api/info') {
     return jsonResponse({
       name: 'Hugging Face Proxy',
-      version: '4.0.0',
+      version: '4.1.0',
       endpoints: {
         models: '/models/*',
         datasets: '/datasets/*',
@@ -416,22 +426,69 @@ async function handleRequest(request, env) {
         'Cookie Domain rewriting',
         'OAuth/Login support',
         'All HF subdomains proxy',
+        'POST redirect fix (302->303)',
       ],
     });
   }
 
+  // ===== 登录/注册 POST 特殊处理（关键修复）=====
+  // 防止登录后重定向到代理前端页面，而是重定向到 HF 的模型页面
+  if ((pathname === '/login' || pathname === '/join') && request.method === 'POST') {
+    const targetUrl = makeTargetUrl(request.url, 'huggingface.co');
+    const response = await proxyRequest(
+      request, targetUrl, 'huggingface.co', proxyHost,
+      (text) => rewriteAllHfDomains(text, proxyHost)
+    );
+
+    // 如果登录成功返回重定向到根路径，改为重定向到 /models
+    // 这样用户登录后会看到 HF 的模型页面，而不是代理前端页面
+    if (response.status >= 300 && response.status < 400) {
+      const loc = response.headers.get('Location');
+      if (loc) {
+        try {
+          const locUrl = new URL(loc);
+          // 如果重定向到代理域名的根路径，改为 /models
+          if (locUrl.hostname === proxyHost && (locUrl.pathname === '/' || locUrl.pathname === '')) {
+            const newHeaders = new Headers(response.headers);
+            newHeaders.set('Location', `https://${proxyHost}/models`);
+            return new Response(response.body, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: newHeaders,
+            });
+          }
+        } catch (e) {
+          // 相对路径如 "/"
+          if (loc === '/' || loc === '') {
+            const newHeaders = new Headers(response.headers);
+            newHeaders.set('Location', `https://${proxyHost}/models`);
+            return new Response(response.body, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: newHeaders,
+            });
+          }
+        }
+      }
+    }
+    return response;
+  }
+
+  // ===== Space 代理 =====
   const spaceInfo = parseSpacePath(pathname);
 
   if (spaceInfo) {
     const { user, space, rest } = spaceInfo;
     const subdomain = getSpaceSubdomain(user, space);
 
+    // WebSocket 升级
     const upgrade = request.headers.get('Upgrade');
     if (upgrade === 'websocket') {
       const targetWsUrl = `wss://${subdomain}${rest}${url.search}`;
       return proxyWebSocket(request, targetWsUrl);
     }
 
+    // 判断走哪个后端
     if (isGradioBackend(rest)) {
       const targetUrl = makeTargetUrl(request.url, subdomain, rest);
       return proxyRequest(
@@ -447,6 +504,7 @@ async function handleRequest(request, env) {
     }
   }
 
+  // ===== 标准 Hugging Face 代理 =====
   let targetHost = 'huggingface.co';
   if (pathname.startsWith('/api/datasets/')) {
     targetHost = 'datasets-server.huggingface.co';
@@ -467,7 +525,7 @@ function serveFrontend(domain) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Hugging Face 代理 v4.0</title>
+  <title>Hugging Face 代理 v4.1</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
@@ -561,6 +619,8 @@ function serveFrontend(domain) {
     .changelog { background: var(--bg); padding: 1rem; border-radius: 0.5rem; margin-top: 1rem; }
     .changelog li { color: var(--text-muted); margin: 0.5rem 0; }
     .changelog li strong { color: var(--accent-light); }
+    .warning-box { background: rgba(245,158,11,0.1); border: 1px solid var(--warning); border-radius: 0.5rem; padding: 1rem; margin: 1rem 0; }
+    .warning-box p { color: var(--text); font-size: 0.95rem; }
     @media (max-width: 768px) {
       .container { padding: 1rem; } h1 { font-size: 1.8rem; }
       .input-group { flex-direction: column; } .grid { grid-template-columns: 1fr; }
@@ -572,7 +632,7 @@ function serveFrontend(domain) {
   <div class="container">
     <header>
       <div class="logo">🤗</div>
-      <h1>Hugging Face 代理 <span class="badge badge-v4">v4.0</span></h1>
+      <h1>Hugging Face 代理 <span class="badge badge-v4">v4.1</span></h1>
       <p class="subtitle">加速访问 Hugging Face 模型、数据集、Spaces 和 Gradio API</p>
       <div class="status-badge">
         <span class="status-dot"></span>
@@ -583,6 +643,7 @@ function serveFrontend(domain) {
     <div class="card">
       <h2>🚀 更新日志</h2>
       <ul class="changelog">
+        <li><strong>v4.1</strong> — 修复 Login/Signup POST 重定向问题（302→303），登录后自动跳转到模型页面</li>
         <li><strong>v4.0</strong> — 全面修复 Login/Signup/OAuth 支持，重写所有 HF 域名，Cookie Domain 重写</li>
         <li><strong>v3.0</strong> — 重写代理逻辑，修复 Space 页面 404，支持 Gradio Space 完整代理</li>
         <li><strong>v2.0</strong> — 添加 WebSocket、SSE 流式传输支持</li>
@@ -615,6 +676,9 @@ function serveFrontend(domain) {
       <p style="color: var(--text-muted); margin-bottom: 1rem;">
         通过代理直接访问 Hugging Face 的登录和注册页面。支持 OAuth、SSO 和常规账号密码登录。
       </p>
+      <div class="warning-box">
+        <p>💡 <strong>提示：</strong>登录成功后将自动跳转到模型页面。登录态通过 Cookie 保持，可在代理域名下正常使用 Hugging Face 的所有功能。</p>
+      </div>
       <div class="input-group">
         <button class="info" onclick="window.open('${domain}/login', '_blank')">🔑 登录 (Login)</button>
         <button class="info" onclick="window.open('${domain}/join', '_blank')">✨ 注册 (Sign Up)</button>
@@ -799,8 +863,8 @@ login()
       </div>
       <div class="feature-card">
         <div class="feature-icon">🔐</div>
-        <h3>登录 / OAuth 支持 <span class="badge badge-v4">v4.0</span></h3>
-        <p>完整支持 Hugging Face 登录、注册、OAuth 授权流程，Cookie Domain 自动重写。</p>
+        <h3>登录 / OAuth 支持 <span class="badge badge-v4">v4.1</span></h3>
+        <p>完整支持 Hugging Face 登录、注册、OAuth 授权流程，Cookie Domain 自动重写，POST 重定向修复。</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🌐</div>
@@ -830,10 +894,10 @@ login()
 /&lt;model-id&gt;/resolve/main/&lt;file&gt;                <span class="comment"># 下载文件</span>
 /&lt;model-id&gt;/blob/main/&lt;file&gt;                   <span class="comment"># 查看文件</span>
 /pipeline/&lt;task&gt;/&lt;model-id&gt;                  <span class="comment"># 推理 API</span>
-/login                                           <span class="comment"># 登录 (v4.0)</span>
-/join                                            <span class="comment"># 注册 (v4.0)</span>
-/oauth/*                                         <span class="comment"># OAuth (v4.0)</span>
-/settings/*                                      <span class="comment"># 用户设置 (v4.0)</span>
+/login                                           <span class="comment"># 登录 (v4.1)</span>
+/join                                            <span class="comment"># 注册 (v4.1)</span>
+/oauth/*                                         <span class="comment"># OAuth (v4.1)</span>
+/settings/*                                      <span class="comment"># 用户设置 (v4.1)</span>
       </div>
     </div>
   </div>
