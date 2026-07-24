@@ -1,11 +1,11 @@
-name = "hf-proxy"
+name = "wzz-website"
 main = "workers/index.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-# 自定义域名路由配置
+# 自定义域名配置（Custom Domain 不支持通配符和路径）
 routes = [
-  { pattern = "wzzyyds2011.de5.net/*", custom_domain = true }
+  { pattern = "wzzyyds2011.de5.net", custom_domain = true }
 ]
 
 # 可选：环境变量

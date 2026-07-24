@@ -1,5 +1,5 @@
 {
-  "name": "hf-proxy",
+  "name": "wzz-website",
   "version": "1.0.0",
   "description": "Hugging Face 代理服务 - 基于 Cloudflare Workers",
   "main": "workers/index.js",

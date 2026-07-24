@@ -85,7 +85,7 @@ async function handleRequest(request, env) {
 
   // 根路径返回前端界面
   if (pathname === '/' || pathname === '/index.html') {
-    return serveFrontend();
+    return serveFrontend(url.origin);
   }
 
   // 静态资源
@@ -209,7 +209,7 @@ function jsonResponse(data, status = 200) {
 }
 
 // 提供前端界面
-function serveFrontend() {
+function serveFrontend(domain) {
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -528,7 +528,7 @@ function serveFrontend() {
         <button class="secondary" onclick="copyUrl()">📋 复制链接</button>
       </div>
       <div class="url-display" id="urlDisplay">
-        <span id="generatedUrl">https://wzzyyds2011.de5.net/models/bert-base-chinese</span>
+        <span id="generatedUrl">${domain}/models/bert-base-chinese</span>
         <button class="copy-btn secondary" onclick="copyGeneratedUrl()">复制</button>
       </div>
     </div>
@@ -548,7 +548,7 @@ function serveFrontend() {
 <span class="keyword">from</span> transformers <span class="keyword">import</span> AutoModel, AutoTokenizer
 
 <span class="comment"># 设置代理 endpoint</span>
-endpoint = <span class="string">"https://wzzyyds2011.de5.net"</span>
+endpoint = <span class="string">"${domain}"</span>
 
 <span class="comment"># 下载模型（通过代理）</span>
 model = AutoModel.from_pretrained(
@@ -561,7 +561,7 @@ model = AutoModel.from_pretrained(
 
 <span class="comment"># 设置环境变量</span>
 <span class="keyword">import</span> os
-os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"https://wzzyyds2011.de5.net"</span>
+os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"${domain}"</span>
 
 file_path = hf_hub_download(
     repo_id=<span class="string">"bert-base-chinese"</span>,
@@ -573,22 +573,22 @@ file_path = hf_hub_download(
       <div id="curl" class="tab-content">
         <div class="code-block">
 <span class="comment"># 下载模型文件</span>
-curl -L <span class="string">"https://wzzyyds2011.de5.net/bert-base-chinese/resolve/main/config.json"</span>
+curl -L <span class="string">"${domain}/bert-base-chinese/resolve/main/config.json"</span>
 
 <span class="comment"># 调用 Inference API</span>
-curl -X POST <span class="string">"https://wzzyyds2011.de5.net/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"</span> \
+curl -X POST <span class="string">"${domain}/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"</span> \
   -H <span class="string">"Content-Type: application/json"</span> \
   -d <span class="string">'{"inputs": "Hello world"}'</span>
 
 <span class="comment"># 获取模型信息</span>
-curl <span class="string">"https://wzzyyds2011.de5.net/api/models/bert-base-chinese"</span>
+curl <span class="string">"${domain}/api/models/bert-base-chinese"</span>
         </div>
       </div>
       
       <div id="js" class="tab-content">
         <div class="code-block">
 <span class="comment">// 使用 fetch API 调用推理服务</span>
-<span class="keyword">const</span> response = <span class="keyword">await</span> <span class="function">fetch</span>(<span class="string">'https://wzzyyds2011.de5.net/pipeline/sentiment-analysis/distilbert-base-uncased-finetuned-sst-2-english'</span>, {
+<span class="keyword">const</span> response = <span class="keyword">await</span> <span class="function">fetch</span>(<span class="string">'${domain}/pipeline/sentiment-analysis/distilbert-base-uncased-finetuned-sst-2-english'</span>, {
   method: <span class="string">'POST'</span>,
   headers: { <span class="string">'Content-Type'</span>: <span class="string">'application/json'</span> },
   body: <span class="string">JSON.stringify({ inputs: "I love this product!" })</span>
@@ -598,7 +598,7 @@ curl <span class="string">"https://wzzyyds2011.de5.net/api/models/bert-base-chin
 console.<span class="function">log</span>(result);
 
 <span class="comment">// 下载文件</span>
-<span class="keyword">const</span> fileResponse = <span class="keyword">await</span> <span class="function">fetch</span>(<span class="string">'https://wzzyyds2011.de5.net/bert-base-chinese/resolve/main/pytorch_model.bin'</span>);
+<span class="keyword">const</span> fileResponse = <span class="keyword">await</span> <span class="function">fetch</span>(<span class="string">'${domain}/bert-base-chinese/resolve/main/pytorch_model.bin'</span>);
 <span class="keyword">const</span> blob = <span class="keyword">await</span> fileResponse.<span class="function">blob</span>();
         </div>
       </div>
@@ -606,11 +606,11 @@ console.<span class="function">log</span>(result);
       <div id="git" class="tab-content">
         <div class="code-block">
 <span class="comment"># 克隆模型仓库（使用代理）</span>
-git clone https://wzzyyds2011.de5.net/bert-base-chinese
+git clone ${domain}/bert-base-chinese
 
 <span class="comment"># 或者使用 git-lfs 下载大文件</span>
 <span class="comment"># 先设置环境变量</span>
-<span class="keyword">export</span> HF_ENDPOINT=https://wzzyyds2011.de5.net
+<span class="keyword">export</span> HF_ENDPOINT=${domain}
 
 <span class="comment"># 然后正常使用 huggingface-cli</span>
 huggingface-cli download bert-base-chinese
