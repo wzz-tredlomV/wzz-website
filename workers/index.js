@@ -360,8 +360,10 @@ async function handleRequest(request, env) {
     return new Response(null, { status: 204, headers: getCorsHeaders(origin) });
   }
 
+  // 根路径直接代理 huggingface.co 首页
   if (pathname === '/' || pathname === '/index.html') {
-    return serveFrontend(url.origin);
+    const targetUrl = makeTargetUrl(request.url, 'huggingface.co');
+    return proxyRequest(request, targetUrl, 'huggingface.co', proxyHost, (text) => rewriteAllHfDomains(text, proxyHost));
   }
 
   if (pathname === '/health') {
