@@ -99,10 +99,8 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
   if (!text || typeof text !== 'string') return text;
   const prefix = '/spaces/' + user + '/' + space;
   const subdomain = getSpaceSubdomain(user, space);
-  const absRe = new RegExp(
-    'https?://' + subdomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-    'g'
-  );
+  const escapedSubdomain = subdomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const absRe = new RegExp('https?://' + escapedSubdomain, 'g');
   text = text.replace(absRe, 'https://' + proxyHost + prefix);
   const rewrites = [
     { from: '/gradio_api/', to: prefix + '/gradio_api/' },
@@ -115,10 +113,8 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
     { from: '/theme.css', to: prefix + '/theme.css' },
   ];
   for (const rw of rewrites) {
-    const pattern = new RegExp(
-      '(["\'\\s]|^)' + rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'),
-      'g'
-    );
+    const escapedFrom = rw.from.replace(/[.*+?^${}()|[\]\/]/g, '\\$&');
+    const pattern = new RegExp('(["\'\\s]|^)' + escapedFrom, 'g');
     text = text.replace(pattern, '$1' + rw.to);
   }
   const exactPaths = [
@@ -126,10 +122,8 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
     '/reset', '/app_id', '/session', '/login', '/logout', '/token'
   ];
   for (const ep of exactPaths) {
-    const pattern = new RegExp(
-      '(["\'\\s]|^)' + ep.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '(?=["\'\\s?&/\n]|$)',
-      'g'
-    );
+    const escapedEp = ep.replace(/[.*+?^${}()|[\]\/]/g, '\\$&');
+    const pattern = new RegExp('(["\'\\s]|^)' + escapedEp + '(?=["\'\\s?&/\n]|$)', 'g');
     text = text.replace(pattern, '$1' + prefix + ep);
   }
   return text;
@@ -139,10 +133,8 @@ function rewriteHfCoSpaceContent(text, proxyHost, user, space) {
   if (!text || typeof text !== 'string') return text;
   const prefix = '/spaces/' + user + '/' + space;
   const subdomain = getSpaceSubdomain(user, space);
-  const absRe = new RegExp(
-    'https?://' + subdomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-    'g'
-  );
+  const escapedSubdomain = subdomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const absRe = new RegExp('https?://' + escapedSubdomain, 'g');
   text = text.replace(absRe, 'https://' + proxyHost + prefix);
   text = text.replace(
     /https?:\/\/huggingface\.co\/spaces\//g,
@@ -159,10 +151,8 @@ function rewriteAllHfDomains(text, proxyHost) {
     { from: 'huggingface.space', to: proxyHost },
   ];
   for (const mapping of domainMappings) {
-    const pattern = new RegExp(
-      'https?://' + mapping.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-      'g'
-    );
+    const escapedFrom = mapping.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp('https?://' + escapedFrom, 'g');
     text = text.replace(pattern, 'https://' + mapping.to);
   }
   return text;
@@ -175,15 +165,19 @@ function rewriteGenericContent(text, targetHost, proxyHost, targetPathPrefix) {
   if (!text || typeof text !== 'string') return text;
 
   const escapedHost = targetHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const absPattern = new RegExp('https?://' + escapedHost + '([^"'>\\s]*)', 'g');
+
+  // 替换绝对 URL: https://target.com/path -> https://proxy.com/proxy/target.com/path
+  const absPattern = new RegExp('https?://' + escapedHost + '([^"\'>\\s]*)', 'g');
   text = text.replace(absPattern, function(match, path) {
     return 'https://' + proxyHost + targetPathPrefix + path;
   });
 
-  const protoRelPattern = new RegExp('(["'])(//' + escapedHost + '[^"'>\\s]*)', 'g');
+  // 替换协议相对 URL
+  const protoRelPattern = new RegExp('(["\'])(//' + escapedHost + '[^"\'>\\s]*)', 'g');
   text = text.replace(protoRelPattern, '$1//' + proxyHost + targetPathPrefix + '$2');
 
-  const rootPathPattern = /((?:href|src|action)=["'])\/([^"']*)/g;
+  // 处理根路径引用
+  const rootPathPattern = /((?:href|src|action)=["\'])\/([^"\']*)/g;
   text = text.replace(rootPathPattern, function(match, attr, path) {
     if (path.startsWith('proxy/') || path.startsWith('spaces/')) return match;
     return attr + targetPathPrefix + '/' + path;
@@ -520,7 +514,7 @@ async function handleRequest(request, env) {
 // 关键修复：使用字符串拼接代替模板字符串，避免 ${domain} 冲突
 
 function serveFrontend(domain) {
-  const html = '<!DOCTYPE html>' +
+  var html = '<!DOCTYPE html>' +
 '<html lang="zh-CN">' +
 '<head>' +
 '  <meta charset="UTF-8">' +
@@ -642,8 +636,8 @@ function serveFrontend(domain) {
 '    </header>' +
 '' +
 '    <div class="mode-switch">' +
-'      <button class="mode-btn active" onclick="switchMode("generic")">🌍 通用代理</button>' +
-'      <button class="mode-btn" onclick="switchMode("hf")">🤗 Hugging Face</button>' +
+'      <button class="mode-btn active" onclick="switchMode(\'generic\')">🌍 通用代理</button>' +
+'      <button class="mode-btn" onclick="switchMode(\'hf\')">🤗 Hugging Face</button>' +
 '    </div>' +
 '' +
 '    <div id="generic-panel" class="section active">' +
@@ -667,24 +661,15 @@ function serveFrontend(domain) {
 '        ' +
 '        <h3 style="margin: 1.5rem 0 0.5rem; font-size: 1rem;">使用方式：</h3>' +
 '        <div class="code-block">' +
-'<span class="comment"># 方式1：路径形式</span>
-' +
-'' + domain + '/proxy/example.com
-' +
-'' + domain + '/proxy/example.com/path/to/page
-' +
-'
-' +
-'<span class="comment"># 方式2：查询参数形式</span>
-' +
-'' + domain + '/proxy/?target=https://example.com
-' +
-'' + domain + '/?target=https://example.com
-' +
-'
-' +
-'<span class="comment"># 方式3：API 调用</span>
-' +
+'<span class="comment"># 方式1：路径形式</span>\n' +
+'' + domain + '/proxy/example.com\n' +
+'' + domain + '/proxy/example.com/path/to/page\n' +
+'\n' +
+'<span class="comment"># 方式2：查询参数形式</span>\n' +
+'' + domain + '/proxy/?target=https://example.com\n' +
+'' + domain + '/?target=https://example.com\n' +
+'\n' +
+'<span class="comment"># 方式3：API 调用</span>\n' +
 'curl ' + domain + '/proxy/api.github.com/users/octocat' +
 '        </div>' +
 '      </div>' +
@@ -714,9 +699,9 @@ function serveFrontend(domain) {
 '      <div class="card">' +
 '        <h2>🔐 登录 / 注册</h2>' +
 '        <div class="input-group">' +
-'          <button class="info" onclick="window.open('' + domain + '/login', '_blank')">🔑 登录</button>' +
-'          <button class="info" onclick="window.open('' + domain + '/join', '_blank')">✨ 注册</button>' +
-'          <button class="secondary" onclick="window.open('' + domain + '/settings/profile', '_blank')">⚙️ 设置</button>' +
+'          <button class="info" onclick="window.open(\'' + domain + '/login\', \'_blank\')">🔑 登录</button>' +
+'          <button class="info" onclick="window.open(\'' + domain + '/join\', \'_blank\')">✨ 注册</button>' +
+'          <button class="secondary" onclick="window.open(\'' + domain + '/settings/profile\', \'_blank\')">⚙️ 设置</button>' +
 '        </div>' +
 '      </div>' +
 '' +
@@ -735,68 +720,51 @@ function serveFrontend(domain) {
 '      <div class="card">' +
 '        <h2>💻 使用示例</h2>' +
 '        <div class="tabs">' +
-'          <button class="tab active" onclick="switchTab('python')">Python</button>' +
-'          <button class="tab" onclick="switchTab('curl')">cURL</button>' +
-'          <button class="tab" onclick="switchTab('js')">JavaScript</button>' +
-'          <button class="tab" onclick="switchTab('git')">Git</button>' +
-'          <button class="tab" onclick="switchTab('gradio')">Gradio</button>' +
+'          <button class="tab active" onclick="switchTab(\'python\')">Python</button>' +
+'          <button class="tab" onclick="switchTab(\'curl\')">cURL</button>' +
+'          <button class="tab" onclick="switchTab(\'js\')">JavaScript</button>' +
+'          <button class="tab" onclick="switchTab(\'git\')">Git</button>' +
+'          <button class="tab" onclick="switchTab(\'gradio\')">Gradio</button>' +
 '        </div>' +
 '        <div id="python" class="tab-content active">' +
 '          <div class="code-block">' +
-'<span class="comment"># 使用 transformers</span>
-' +
-'<span class="keyword">from</span> transformers <span class="keyword">import</span> AutoModel
-' +
-'<span class="keyword">import</span> os
-' +
-'os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"' + domain + '"</span>
-' +
+'<span class="comment"># 使用 transformers</span>\n' +
+'<span class="keyword">from</span> transformers <span class="keyword">import</span> AutoModel\n' +
+'<span class="keyword">import</span> os\n' +
+'os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"' + domain + '"</span>\n' +
 'model = AutoModel.from_pretrained(<span class="string">"bert-base-chinese"</span>)' +
 '          </div>' +
 '        </div>' +
 '        <div id="curl" class="tab-content">' +
 '          <div class="code-block">' +
-'<span class="comment"># 下载模型</span>
-' +
-'curl -L <span class="string">"' + domain + '/bert-base-chinese/resolve/main/config.json"</span>
-' +
-'
-' +
-'<span class="comment"># 通用代理</span>
-' +
+'<span class="comment"># 下载模型</span>\n' +
+'curl -L <span class="string">"' + domain + '/bert-base-chinese/resolve/main/config.json"</span>\n' +
+'\n' +
+'<span class="comment"># 通用代理</span>\n' +
 'curl -L <span class="string">"' + domain + '/proxy/api.github.com"</span>' +
 '          </div>' +
 '        </div>' +
 '        <div id="js" class="tab-content">' +
 '          <div class="code-block">' +
-'<span class="comment">// 调用推理 API</span>
-' +
-'<span class="keyword">const</span> res = <span class="keyword">await</span> fetch(<span class="string">'' + domain + '/pipeline/sentiment-analysis/...'</span>, {
-' +
-'  method: <span class="string">'POST'</span>,
-' +
-'  headers: { <span class="string">'Content-Type'</span>: <span class="string">'application/json'</span> },
-' +
-'  body: <span class="string">JSON.stringify({ inputs: "Hello!" })</span>
-' +
+'<span class="comment">// 调用推理 API</span>\n' +
+'<span class="keyword">const</span> res = <span class="keyword">await</span> fetch(<span class="string">\'' + domain + '/pipeline/sentiment-analysis/...\'</span>, {\n' +
+'  method: <span class="string">\'POST\'</span>,\n' +
+'  headers: { <span class="string">\'Content-Type\'</span>: <span class="string">\'application/json\'</span> },\n' +
+'  body: <span class="string">JSON.stringify({ inputs: "Hello!" })</span>\n' +
 '});' +
 '          </div>' +
 '        </div>' +
 '        <div id="git" class="tab-content">' +
 '          <div class="code-block">' +
-'<span class="keyword">export</span> HF_ENDPOINT=' + domain + '
-' +
+'<span class="keyword">export</span> HF_ENDPOINT=' + domain + '\n' +
 'git clone ' + domain + '/bert-base-chinese' +
 '          </div>' +
 '        </div>' +
 '        <div id="gradio" class="tab-content">' +
 '          <div class="code-block">' +
-'<span class="keyword">from</span> gradio_client <span class="keyword">import</span> Client
-' +
-'<span class="keyword">import</span> os
-' +
-'os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"' + domain + '"</span>
-' +
+'<span class="keyword">from</span> gradio_client <span class="keyword">import</span> Client\n' +
+'<span class="keyword">import</span> os\n' +
+'os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"' + domain + '"</span>\n' +
 'client = Client(<span class="string">"username/space-name"</span>)' +
 '          </div>' +
 '        </div>' +
