@@ -1,38 +1,23 @@
 /**
- * 通用网站代理服务 — 终极版 v5.1
- * 支持任意网站代理，保留HF特殊处理
- * 增强 DNS 解析和错误处理
+ * 通用网站代理 + Hugging Face 专用代理 v5.0
+ * 支持：任意网站代理（通过 ?target=URL）+ 完整的 Hugging Face 代理
  */
 
 // ==================== 配置 ====================
-const CONFIG = {
-  // 默认代理目标（当没有指定target参数时）
-  defaultTarget: 'huggingface.co',
-  // 是否允许代理任意网站（安全考虑）
-  allowAnyTarget: true,
-  // 黑名单域名（禁止代理的网站）
-  blacklist: ['localhost', '127.0.0.1', '::1', 'internal'],
-  // 超时设置（毫秒）
-  timeout: 30000,
-  // 重试次数
-  retries: 2,
-  // 备用 DNS 解析（用于某些被 Cloudflare 屏蔽的域名）
-  fallbackIPs: {
-    // 'windscrepo.com': '1.2.3.4', // 如果有 IP 可以添加
-  },
-  // 需要特殊处理的域名
-  specialDomains: {
-    'huggingface.co': { type: 'hf' },
-    'hf.co': { type: 'hf' },
-    'huggingface.space': { type: 'hf' },
-  }
+
+const HF_DOMAINS = ['huggingface.co', 'hf.co', 'huggingface.space'];
+const HF_API_HOSTS = {
+  '/api/datasets/': 'datasets-server.huggingface.co',
+  '/api/inference/': 'api-inference.huggingface.co',
+  '/pipeline/': 'api-inference.huggingface.co',
+  '/cdn/': 'cdn-lfs.huggingface.co',
+  '/cdn-lfs/': 'cdn-lfs.huggingface.co',
 };
 
 // ==================== 工具函数 ====================
 
 function isHfDomain(hostname) {
-  const hfDomains = ['huggingface.co', 'hf.co', 'huggingface.space'];
-  for (const domain of hfDomains) {
+  for (const domain of HF_DOMAINS) {
     if (hostname === domain || hostname.endsWith('.' + domain)) return true;
   }
   return false;
@@ -58,10 +43,10 @@ function getCorsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, X-CSRF-Token, Cache-Control, X-Api-Key, X-Api-Secret, X-Gradio-Event-Id, X-Gradio-Request-Id, Gradio-Client-Hash, Cookie',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Auth-Token, X-CSRF-Token, Cache-Control, X-Api-Key, X-Api-Secret, X-Gradio-Event-Id, X-Gradio-Request-Id, Gradio-Client-Hash, Cookie, X-Proxy-Target',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Max-Age': '86400',
-    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, X-Request-Id, X-Cache-Status, X-Cache-Hits, X-Gradio-Event-Id, X-Gradio-Request-Id, Set-Cookie',
+    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, X-Request-Id, X-Cache-Status, X-Cache-Hits, X-Gradio-Event-Id, X-Gradio-Request-Id, Set-Cookie, Location',
   };
 }
 
@@ -70,6 +55,9 @@ function makeTargetUrl(originalUrl, targetHost, pathname) {
   u.hostname = targetHost;
   u.protocol = 'https';
   if (pathname !== undefined) u.pathname = pathname;
+  // 清理代理相关的查询参数
+  u.searchParams.delete('target');
+  u.searchParams.delete('rewrite');
   return u.toString();
 }
 
@@ -80,16 +68,15 @@ function buildProxyHeaders(request, targetHost, proxyHost) {
   h.set('Referer', `https://${targetHost}/`);
   h.delete('Origin');
   h.set('Origin', `https://${targetHost}`);
-  h.delete('CF-Connecting-IP');
-  h.delete('CF-Visitor');
-  h.delete('CF-Ray');
-  h.delete('CF-Worker');
-  h.delete('CF-IPCountry');
-  h.delete('CF-Request-ID');
+  // 删除 Cloudflare 相关头部
+  const cfHeaders = ['CF-Connecting-IP', 'CF-Visitor', 'CF-Ray', 'CF-Worker', 'CF-IPCountry', 'CF-Request-ID'];
+  for (const cfh of cfHeaders) h.delete(cfh);
   h.set('X-Forwarded-Host', proxyHost);
   h.set('X-Forwarded-Proto', 'https');
   const realIp = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For');
   if (realIp) h.set('X-Forwarded-For', realIp);
+  // 删除代理自定义头部，防止发送到目标
+  h.delete('X-Proxy-Target');
   return h;
 }
 
@@ -100,49 +87,16 @@ function parseSpacePath(pathname) {
 }
 
 function isGradioBackend(rest) {
-  return rest.startsWith('/gradio_api/') ||
-         rest === '/config' ||
-         rest.startsWith('/assets/') ||
-         rest.startsWith('/static/') ||
-         rest.startsWith('/file=') ||
-         rest.startsWith('/file/') ||
-         rest === '/upload' ||
-         rest === '/heartbeat' ||
-         rest.startsWith('/queue/') ||
-         rest.startsWith('/run/') ||
-         rest === '/predict' ||
-         rest === '/api/predict' ||
-         rest === '/reset' ||
-         rest === '/app_id' ||
-         rest === '/session' ||
-         rest === '/login' ||
-         rest === '/logout' ||
-         rest === '/token' ||
-         rest === '/theme.css';
-}
-
-function isBlacklisted(hostname) {
-  return CONFIG.blacklist.some(domain => 
-    hostname === domain || hostname.endsWith('.' + domain)
-  );
-}
-
-function getTargetFromPath(pathname) {
-  const match = pathname.match(/^\/proxy\/(https?:\/\/[^\/]+)(\/.*)?$/);
-  if (match) {
-    const url = new URL(match[1]);
-    return {
-      host: url.hostname,
-      path: match[2] || '/',
-      protocol: url.protocol,
-    };
-  }
-  return null;
+  const gradioPaths = [
+    '/gradio_api/', '/config', '/assets/', '/static/', '/file=', '/file/',
+    '/upload', '/heartbeat', '/queue/', '/run/', '/predict', '/api/predict',
+    '/reset', '/app_id', '/session', '/login', '/logout', '/token', '/theme.css'
+  ];
+  return gradioPaths.some(p => rest === p || rest.startsWith(p));
 }
 
 // ==================== 内容重写函数 ====================
 
-// HF Space 内容重写
 function rewriteHfSpaceContent(text, proxyHost, user, space) {
   if (!text || typeof text !== 'string') return text;
   const prefix = `/spaces/${user}/${space}`;
@@ -164,30 +118,21 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
   ];
   for (const rw of rewrites) {
     const pattern = new RegExp(
-      `(["'\s]|^)${rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`,
+      `(["'\\s]|^)${rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`,
       'g'
     );
     text = text.replace(pattern, `$1${rw.to}`);
   }
   const exactPaths = [
-    { from: '/config', to: `${prefix}/config` },
-    { from: '/upload', to: `${prefix}/upload` },
-    { from: '/heartbeat', to: `${prefix}/heartbeat` },
-    { from: '/predict', to: `${prefix}/predict` },
-    { from: '/api/predict', to: `${prefix}/api/predict` },
-    { from: '/reset', to: `${prefix}/reset` },
-    { from: '/app_id', to: `${prefix}/app_id` },
-    { from: '/session', to: `${prefix}/session` },
-    { from: '/login', to: `${prefix}/login` },
-    { from: '/logout', to: `${prefix}/logout` },
-    { from: '/token', to: `${prefix}/token` },
+    '/config', '/upload', '/heartbeat', '/predict', '/api/predict',
+    '/reset', '/app_id', '/session', '/login', '/logout', '/token'
   ];
-  for (const rw of exactPaths) {
+  for (const ep of exactPaths) {
     const pattern = new RegExp(
-      `(["'\s]|^)${rw.from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?=["'\s?&/\n]|$)`,
+      `(["'\\s]|^)${ep.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?=["'\\s?&/\\n]|$)`,
       'g'
     );
-    text = text.replace(pattern, `$1${rw.to}`);
+    text = text.replace(pattern, `$1${prefix}${ep}`);
   }
   return text;
 }
@@ -225,19 +170,31 @@ function rewriteAllHfDomains(text, proxyHost) {
   return text;
 }
 
-function rewriteGenericContent(text, proxyHost, targetHost) {
+/**
+ * 通用内容重写：将目标域名的绝对 URL 替换为代理 URL
+ */
+function rewriteGenericContent(text, targetHost, proxyHost, targetPathPrefix) {
   if (!text || typeof text !== 'string') return text;
   
-  // 重写所有指向目标域名的链接到代理域名
-  const targetPattern = new RegExp(
-    `https?://${targetHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
-    'g'
-  );
-  text = text.replace(targetPattern, `https://${proxyHost}`);
+  // 替换绝对 URL: https://target.com/path -> https://proxy.com/proxy/target.com/path
+  const escapedHost = targetHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const absPattern = new RegExp(`https?://${escapedHost}([^"'>\\s]*)`, 'g');
+  text = text.replace(absPattern, (match, path) => {
+    return `https://${proxyHost}${targetPathPrefix}${path}`;
+  });
   
-  // 重写相对路径为绝对路径（处理常见的资源引用）
-  // 注意：这里只处理一些明显的情况，不处理所有相对路径
-  // 否则可能会破坏页面逻辑
+  // 替换协议相对 URL: //target.com/path -> //proxy.com/proxy/target.com/path
+  const protoRelPattern = new RegExp(`(["'])(//${escapedHost}[^"'>\\s]*)`, 'g');
+  text = text.replace(protoRelPattern, `$1//${proxyHost}${targetPathPrefix}$2`.replace(`//${proxyHost}${targetPathPrefix}//${targetHost}`, `//${proxyHost}${targetPathPrefix}`));
+  
+  // 处理可能的相对路径中的根路径引用（谨慎处理）
+  // 只重写以 / 开头的特定属性值，避免破坏正常相对路径
+  const rootPathPattern = /((?:href|src|action)=["'])\/([^"']*)/g;
+  text = text.replace(rootPathPattern, (match, attr, path) => {
+    // 排除已经是代理路径的
+    if (path.startsWith('proxy/') || path.startsWith('spaces/')) return match;
+    return `${attr}${targetPathPrefix}/${path}`;
+  });
   
   return text;
 }
@@ -250,244 +207,141 @@ function rewriteSetCookie(headerValue, proxyHost) {
   );
 }
 
-// ==================== 备用 DNS 解析方案 ====================
-
-async function tryFallbackResolution(targetUrl, targetHost) {
-  // 如果有配置备用 IP，尝试使用 IP 访问
-  if (CONFIG.fallbackIPs[targetHost]) {
-    const ip = CONFIG.fallbackIPs[targetHost];
-    const url = new URL(targetUrl);
-    url.hostname = ip;
-    url.host = ip;
-    // 添加 Host 头，让服务器知道真正的域名
-    return url.toString();
-  }
-
-  // 尝试通过 DNS over HTTPS 解析
-  try {
-    const dnsResult = await fetch(
-      `https://cloudflare-dns.com/dns-query?name=${targetHost}&type=A`,
-      {
-        headers: {
-          'Accept': 'application/dns-json',
-        },
-      }
-    );
-    const data = await dnsResult.json();
-    if (data.Answer && data.Answer.length > 0) {
-      const ip = data.Answer[0].data;
-      const url = new URL(targetUrl);
-      url.hostname = ip;
-      url.host = ip;
-      return url.toString();
-    }
-  } catch (e) {
-    // DNS 查询失败，忽略
-  }
-
-  return null;
-}
-
 // ==================== 核心代理函数 ====================
 
-async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn) {
+async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn, options = {}) {
   const proxyHeaders = buildProxyHeaders(request, targetHost, proxyHost);
   const origin = request.headers.get('Origin') || '*';
+  const isGenericProxy = options.isGenericProxy || false;
+  const targetPathPrefix = options.targetPathPrefix || '';
 
-  // 重试逻辑
-  let lastError = null;
-  for (let attempt = 0; attempt <= CONFIG.retries; attempt++) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), CONFIG.timeout);
+  try {
+    const proxyReq = new Request(targetUrl, {
+      method: request.method,
+      headers: proxyHeaders,
+      body: request.body,
+      redirect: 'manual',
+    });
 
-      const proxyReq = new Request(targetUrl, {
-        method: request.method,
-        headers: proxyHeaders,
-        body: request.body,
-        redirect: 'manual',
-        signal: controller.signal,
-      });
+    const response = await fetch(proxyReq);
+    const respHeaders = new Headers(response.headers);
+    
+    // 添加 CORS
+    Object.entries(getCorsHeaders(origin)).forEach(([k, v]) => respHeaders.set(k, v));
 
-      const response = await fetch(proxyReq);
-      clearTimeout(timeoutId);
-
-      // 检查是否是 Cloudflare 错误页面
-      try {
-        const text = await response.text();
-        if (text.includes('Error 1016') || text.includes('Cloudflare is currently unable to resolve')) {
-          // 如果是 DNS 解析错误，尝试备用方案
-          const fallbackUrl = await tryFallbackResolution(targetUrl, targetHost);
-          if (fallbackUrl) {
-            // 递归调用，使用备用 URL
-            return proxyRequest(request, fallbackUrl, targetHost, proxyHost, rewriteFn);
-          }
-          return new Response(
-            `无法解析域名: ${targetHost}\n\n` +
-            `该域名可能已被封锁或 DNS 解析失败。\n` +
-            `提示: 如果是 Cloudflare 保护的网站，可能需要在代理服务器配置 DNS 解析。\n\n` +
-            `原始错误: ${text.substring(0, 500)}...`,
-            {
-              status: 502,
-              headers: {
-                'Content-Type': 'text/plain;charset=UTF-8',
-                ...getCorsHeaders(origin),
-              },
-            }
-          );
+    // Cookie 重写
+    if (respHeaders.getAll) {
+      const cookies = respHeaders.getAll('Set-Cookie');
+      if (cookies && cookies.length > 0) {
+        respHeaders.delete('Set-Cookie');
+        for (const cookie of cookies) {
+          respHeaders.append('Set-Cookie', rewriteSetCookie(cookie, proxyHost));
         }
+      }
+    } else {
+      const setCookie = respHeaders.get('Set-Cookie');
+      if (setCookie) {
+        respHeaders.set('Set-Cookie', rewriteSetCookie(setCookie, proxyHost));
+      }
+    }
 
-        // 如果响应是 Cloudflare 错误页面，但内容被截断，尝试重新获取
-        if (response.status === 502 || response.status === 503) {
-          if (text.includes('Cloudflare') || text.includes('Error 1')) {
-            return new Response(
-              `代理目标 ${targetHost} 返回了 Cloudflare 错误。\n` +
-              `状态码: ${response.status}\n` +
-              `这可能是因为目标网站使用了 Cloudflare 且无法正确解析。\n\n` +
-              `建议:\n` +
-              `1. 检查目标域名是否正确\n` +
-              `2. 尝试使用 IP 地址直接访问\n` +
-              `3. 稍后重试\n`,
-              {
-                status: 502,
-                headers: {
-                  'Content-Type': 'text/plain;charset=UTF-8',
-                  ...getCorsHeaders(origin),
-                },
+    // 重定向处理
+    if (response.status >= 300 && response.status < 400) {
+      const loc = respHeaders.get('Location');
+      if (loc) {
+        try {
+          const locUrl = new URL(loc, targetUrl);
+          
+          if (isHfDomain(locUrl.hostname)) {
+            // HF 域名重定向
+            if (isSpaceDomain(locUrl.hostname)) {
+              const spaceInfo = parseSpaceSubdomain(locUrl.hostname);
+              if (spaceInfo) {
+                locUrl.pathname = `/spaces/${spaceInfo.user}/${spaceInfo.space}${locUrl.pathname}`;
               }
-            );
-          }
-          // 如果不是 Cloudflare 错误，继续处理
-          return processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, text);
-        }
-
-        // 正常处理响应
-        return processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, text);
-
-      } catch (e) {
-        // 如果读取响应体失败，尝试直接返回
-        return processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, null);
-      }
-
-    } catch (err) {
-      lastError = err;
-      if (attempt < CONFIG.retries) {
-        // 等待后重试
-        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-        continue;
-      }
-    }
-  }
-
-  // 所有重试都失败
-  return jsonResponse({
-    error: 'Proxy Error',
-    message: `无法连接到目标服务器: ${targetHost}`,
-    details: lastError ? lastError.message : 'Unknown error',
-    suggestion: '请检查目标域名是否正确，或尝试使用 /proxy/https://example.com 格式',
-  }, 502);
-}
-
-// ==================== 响应处理函数 ====================
-
-async function processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, bodyText) {
-  const respHeaders = new Headers(response.headers);
-  Object.entries(getCorsHeaders(origin)).forEach(([k, v]) => respHeaders.set(k, v));
-
-  // Cookie 重写
-  if (respHeaders.getAll) {
-    const cookies = respHeaders.getAll('Set-Cookie');
-    if (cookies && cookies.length > 0) {
-      respHeaders.delete('Set-Cookie');
-      for (const cookie of cookies) {
-        respHeaders.append('Set-Cookie', rewriteSetCookie(cookie, proxyHost));
-      }
-    }
-  } else {
-    const setCookie = respHeaders.get('Set-Cookie');
-    if (setCookie) {
-      respHeaders.set('Set-Cookie', rewriteSetCookie(setCookie, proxyHost));
-    }
-  }
-
-  // 重定向处理
-  if (response.status >= 300 && response.status < 400) {
-    const loc = respHeaders.get('Location');
-    if (loc) {
-      try {
-        const locUrl = new URL(loc, `https://${targetHost}`);
-        if (isHfDomain(locUrl.hostname)) {
-          if (isSpaceDomain(locUrl.hostname)) {
-            const spaceInfo = parseSpaceSubdomain(locUrl.hostname);
-            if (spaceInfo) {
-              locUrl.pathname = `/spaces/${spaceInfo.user}/${spaceInfo.space}${locUrl.pathname}`;
             }
+            locUrl.hostname = proxyHost;
+            locUrl.protocol = 'https';
+            respHeaders.set('Location', locUrl.toString());
+          } else if (isGenericProxy) {
+            // 通用代理重定向：指向代理路径
+            const redirectPath = `/proxy/${locUrl.hostname}${locUrl.pathname}${locUrl.search}`;
+            locUrl.hostname = proxyHost;
+            locUrl.protocol = 'https';
+            locUrl.pathname = redirectPath;
+            locUrl.search = '';
+            respHeaders.set('Location', locUrl.toString());
           }
-          locUrl.hostname = proxyHost;
-          locUrl.protocol = 'https';
-          respHeaders.set('Location', locUrl.toString());
-        } else if (locUrl.hostname === targetHost) {
-          locUrl.hostname = proxyHost;
-          locUrl.protocol = 'https';
-          respHeaders.set('Location', locUrl.toString());
-        }
-      } catch (e) {
-        if (loc.startsWith('http')) {
-          const newLoc = loc.replace(/https?:\/\/[^\/]+/, `https://${proxyHost}`);
-          respHeaders.set('Location', newLoc);
+        } catch (e) {
+          // 相对路径或无法解析的 URL
+          if (loc.startsWith('http') && isGenericProxy) {
+            // 尝试提取并重写
+            for (const domain of [...HF_DOMAINS]) {
+              if (loc.includes(domain)) {
+                const newLoc = loc.replace(/https?:\/\/[^\/]+/, `https://${proxyHost}`);
+                respHeaders.set('Location', newLoc);
+                break;
+              }
+            }
+          } else if (isGenericProxy && !loc.startsWith('http')) {
+            // 相对路径重定向，添加代理前缀
+            const baseUrl = new URL(targetUrl);
+            const redirectPath = `/proxy/${baseUrl.hostname}${loc.startsWith('/') ? '' : '/'}${loc}`;
+            respHeaders.set('Location', `https://${proxyHost}${redirectPath}`);
+          }
         }
       }
+
+      let finalStatus = response.status;
+      if (request.method === 'POST' && response.status === 302) {
+        finalStatus = 303;
+      }
+
+      return new Response(response.body, {
+        status: finalStatus,
+        statusText: response.statusText,
+        headers: respHeaders,
+      });
     }
 
-    let finalStatus = response.status;
-    if (request.method === 'POST' && response.status === 302) {
-      finalStatus = 303;
+    // 删除安全头部
+    const securityHeaders = ['Content-Security-Policy', 'X-Frame-Options', 'Strict-Transport-Security', 'Expect-CT', 'Report-To', 'NEL'];
+    for (const sh of securityHeaders) respHeaders.delete(sh);
+
+    const ct = respHeaders.get('Content-Type') || '';
+    const isText = ct.includes('text/') ||
+                   ct.includes('application/javascript') ||
+                   ct.includes('application/json') ||
+                   ct.includes('application/xml') ||
+                   ct.includes('application/xhtml');
+
+    const isStream = ct.includes('text/event-stream') ||
+                     ct.includes('application/octet-stream') ||
+                     ct.includes('video/') ||
+                     ct.includes('audio/') ||
+                     ct.includes('image/');
+
+    if (rewriteFn && isText && !isStream) {
+      const text = await response.text();
+      const rewritten = rewriteFn(text);
+      respHeaders.delete('Content-Length');
+      return new Response(rewritten, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: respHeaders,
+      });
     }
 
     return new Response(response.body, {
-      status: finalStatus,
-      statusText: response.statusText,
-      headers: respHeaders,
-    });
-  }
-
-  // 删除安全头部
-  respHeaders.delete('Content-Security-Policy');
-  respHeaders.delete('X-Frame-Options');
-  respHeaders.delete('Strict-Transport-Security');
-  respHeaders.delete('Expect-CT');
-  respHeaders.delete('Report-To');
-  respHeaders.delete('NEL');
-
-  const ct = respHeaders.get('Content-Type') || '';
-  const isText = ct.includes('text/') ||
-                 ct.includes('application/javascript') ||
-                 ct.includes('application/json') ||
-                 ct.includes('application/xml') ||
-                 ct.includes('application/xhtml');
-
-  const isStream = ct.includes('text/event-stream') ||
-                   ct.includes('application/octet-stream') ||
-                   ct.includes('video/') ||
-                   ct.includes('audio/') ||
-                   ct.includes('image/');
-
-  if (rewriteFn && isText && !isStream) {
-    const text = bodyText !== null ? bodyText : await response.text();
-    const rewritten = rewriteFn(text);
-    respHeaders.delete('Content-Length');
-    return new Response(rewritten, {
       status: response.status,
       statusText: response.statusText,
       headers: respHeaders,
     });
-  }
 
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: respHeaders,
-  });
+  } catch (err) {
+    console.error('Proxy error:', err);
+    return jsonResponse({ error: 'Proxy Error', message: err.message }, 502);
+  }
 }
 
 async function proxyWebSocket(request, targetWsUrl) {
@@ -532,62 +386,124 @@ function jsonResponse(data, status = 200) {
 
 // ==================== 路由处理 ====================
 
+async function handleGenericProxy(request, env, targetUrlStr) {
+  const url = new URL(request.url);
+  const proxyHost = url.hostname;
+  
+  let targetUrl;
+  let targetHost;
+  
+  try {
+    // 支持完整 URL 或域名
+    if (targetUrlStr.startsWith('http://') || targetUrlStr.startsWith('https://')) {
+      targetUrl = new URL(targetUrlStr);
+      targetHost = targetUrl.hostname;
+      // 保留原始路径和查询参数
+      const originalPath = url.pathname.replace(/^\/proxy\/[^\/]+/, '') || '/';
+      targetUrl = new URL(originalPath + url.search, targetUrlStr);
+    } else {
+      targetHost = targetUrlStr.split('/')[0];
+      const path = targetUrlStr.includes('/') ? targetUrlStr.substring(targetUrlStr.indexOf('/')) : '/';
+      const originalPath = url.pathname.replace(/^\/proxy\/[^\/]+/, '') || path;
+      targetUrl = new URL(`https://${targetHost}${originalPath}${url.search}`);
+    }
+  } catch (e) {
+    return jsonResponse({ error: 'Invalid target URL', message: e.message }, 400);
+  }
+
+  // 防止循环代理
+  if (targetHost === proxyHost || targetHost.includes('workers.dev') && proxyHost.includes('workers.dev')) {
+    return jsonResponse({ error: 'Loop detected', message: 'Cannot proxy to self' }, 400);
+  }
+
+  const targetPathPrefix = `/proxy/${targetHost}`;
+  
+  const rewriteFn = (text) => rewriteGenericContent(text, targetHost, proxyHost, targetPathPrefix);
+  
+  return proxyRequest(request, targetUrl.toString(), targetHost, proxyHost, rewriteFn, {
+    isGenericProxy: true,
+    targetPathPrefix
+  });
+}
+
 async function handleRequest(request, env) {
   const url = new URL(request.url);
   const pathname = url.pathname;
   const proxyHost = url.hostname;
   const origin = request.headers.get('Origin') || '*';
 
+  // CORS 预检
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: getCorsHeaders(origin) });
   }
 
-  // ==================== 前端页面 ====================
-  if (pathname === '/' || pathname === '/index.html') {
-    return serveFrontend(proxyHost);
-  }
-
-  // ==================== 健康检查 ====================
+  // 健康检查
   if (pathname === '/health') {
     return jsonResponse({ 
       status: 'ok', 
       timestamp: new Date().toISOString(),
-      version: '5.1.0',
-      features: ['generic-proxy', 'hf-special', 'websocket', 'sse', 'dns-fallback']
+      mode: 'universal-proxy',
+      version: '5.0.0'
     });
   }
 
-  // ==================== API 信息 ====================
+  // API 信息
   if (pathname === '/api/info') {
     return jsonResponse({
-      name: 'Universal Proxy Service',
-      version: '5.1.0',
-      description: '代理任意网站，增强 DNS 解析和错误处理',
-      usage: {
-        '代理任意网站': '/proxy/https://example.com/path',
-        '代理 Hugging Face': '/models/*, /datasets/*, /spaces/*',
-        'Gradio Space': '/spaces/<user>/<space>/*',
-      },
+      name: 'Universal Web Proxy + HF Proxy',
+      version: '5.0.0',
       features: [
-        '任意网站代理',
-        'DNS 解析失败自动重试',
-        'Cloudflare 错误检测',
-        '备用 DNS 解析 (DoH)',
-        'Hugging Face 模型/数据集下载',
-        'Inference API',
-        'Gradio Space 代理',
-        'WebSocket 支持',
-        'SSE 流式传输',
-        '智能 URL 重写',
-        'Cookie Domain 重写',
-        'OAuth/Login 支持',
-        'POST 重定向修复',
+        'Universal website proxy via /proxy/<target>',
+        'Hugging Face full proxy',
+        'Gradio Space proxy',
+        'WebSocket support',
+        'SSE streaming',
+        'Cookie rewriting',
+        'Content URL rewriting',
       ],
+      usage: {
+        generic: '/proxy/<target-domain>/<path>?target=<full-url>',
+        hf_models: '/models/<model-id>',
+        hf_datasets: '/datasets/<dataset-id>',
+        hf_spaces: '/spaces/<user>/<space>',
+        hf_login: '/login',
+      }
     });
   }
 
-  // ==================== HF 特殊路由（保留） ====================
+  // ==================== 通用代理路由 ====================
   
+  // /proxy/<target-domain>/path 或 /proxy/?target=URL
+  if (pathname.startsWith('/proxy/')) {
+    // 从路径中提取目标
+    const pathTarget = pathname.replace(/^\/proxy\//, '').split('/')[0];
+    // 从查询参数获取目标
+    const queryTarget = url.searchParams.get('target');
+    const target = queryTarget || pathTarget || url.searchParams.get('url');
+    
+    if (target) {
+      return handleGenericProxy(request, env, target);
+    }
+  }
+  
+  // 快捷方式：/?target=URL 或 /?url=URL
+  const directTarget = url.searchParams.get('target') || url.searchParams.get('url');
+  if (directTarget && (pathname === '/' || pathname === '')) {
+    return handleGenericProxy(request, env, directTarget);
+  }
+
+  // ==================== Hugging Face 专用路由 ====================
+
+  // 根路径 - HF 首页
+  if (pathname === '/' || pathname === '/index.html') {
+    // 如果有 target 参数，走通用代理
+    if (directTarget) {
+      return handleGenericProxy(request, env, directTarget);
+    }
+    const targetUrl = makeTargetUrl(request.url, 'huggingface.co');
+    return proxyRequest(request, targetUrl, 'huggingface.co', proxyHost, (text) => rewriteAllHfDomains(text, proxyHost));
+  }
+
   // HF Space 路由
   const spaceInfo = parseSpacePath(pathname);
   if (spaceInfo) {
@@ -615,74 +531,17 @@ async function handleRequest(request, env) {
     }
   }
 
-  // HF 模型/数据集路由
-  if (pathname.startsWith('/models/') || 
-      pathname.startsWith('/datasets/') ||
-      pathname.startsWith('/api/') ||
-      pathname.startsWith('/pipeline/') ||
-      pathname.startsWith('/cdn/') ||
-      pathname.startsWith('/cdn-lfs/') ||
-      pathname === '/login' ||
-      pathname === '/join' ||
-      pathname.startsWith('/oauth/') ||
-      pathname.startsWith('/settings/') ||
-      pathname.startsWith('/docs/')) {
-    
-    let targetHost = 'huggingface.co';
-    if (pathname.startsWith('/api/datasets/')) {
-      targetHost = 'datasets-server.huggingface.co';
-    } else if (pathname.startsWith('/api/inference/') || pathname.startsWith('/pipeline/')) {
-      targetHost = 'api-inference.huggingface.co';
-    } else if (pathname.startsWith('/cdn/') || pathname.startsWith('/cdn-lfs/')) {
-      targetHost = 'cdn-lfs.huggingface.co';
+  // HF API 路由映射
+  let targetHost = 'huggingface.co';
+  for (const [prefix, host] of Object.entries(HF_API_HOSTS)) {
+    if (pathname.startsWith(prefix)) {
+      targetHost = host;
+      break;
     }
-
-    const targetUrl = makeTargetUrl(request.url, targetHost);
-    return proxyRequest(request, targetUrl, targetHost, proxyHost, (text) => rewriteAllHfDomains(text, proxyHost));
   }
 
-  // ==================== 通用代理路由 ====================
-  
-  // 格式: /proxy/https://example.com/path
-  const proxyTarget = getTargetFromPath(pathname);
-  if (proxyTarget && CONFIG.allowAnyTarget) {
-    const { host, path, protocol } = proxyTarget;
-    
-    // 检查黑名单
-    if (isBlacklisted(host)) {
-      return jsonResponse({ error: 'Target domain is blacklisted' }, 403);
-    }
-    
-    // 检查是否有备用 IP 配置
-    let targetUrl;
-    if (CONFIG.fallbackIPs[host]) {
-      const ip = CONFIG.fallbackIPs[host];
-      targetUrl = `${protocol}//${ip}${path}${url.search}`;
-    } else {
-      targetUrl = makeTargetUrl(request.url, host, path + url.search);
-    }
-    
-    // 检查是否需要特殊处理
-    let rewriteFn = null;
-    if (isHfDomain(host)) {
-      rewriteFn = (text) => rewriteAllHfDomains(text, proxyHost);
-    } else {
-      rewriteFn = (text) => rewriteGenericContent(text, proxyHost, host);
-    }
-    
-    return proxyRequest(request, targetUrl, host, proxyHost, rewriteFn);
-  }
-
-  // ==================== 返回 404 ====================
-  return jsonResponse({
-    error: 'Not Found',
-    message: '请使用 /proxy/https://example.com 格式代理网站',
-    usage: {
-      '代理任意网站': '/proxy/https://example.com/path',
-      '代理 Hugging Face 模型': '/models/bert-base-chinese',
-      '代理 Hugging Face Space': '/spaces/username/space-name',
-    }
-  }, 404);
+  const targetUrl = makeTargetUrl(request.url, targetHost);
+  return proxyRequest(request, targetUrl, targetHost, proxyHost, (text) => rewriteAllHfDomains(text, proxyHost));
 }
 
 // ==================== 前端页面 ====================
@@ -693,7 +552,7 @@ function serveFrontend(domain) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>通用网站代理 v5.1</title>
+  <title>Universal Web Proxy v5.0</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
@@ -701,7 +560,7 @@ function serveFrontend(domain) {
       --text: #f1f5f9; --text-muted: #94a3b8;
       --accent: #f59e0b; --accent-light: #fbbf24;
       --border: #334155; --success: #10b981; --error: #ef4444;
-      --info: #3b82f6; --warning: #f59e0b; --purple: #8b5cf6;
+      --info: #3b82f6; --warning: #f59e0b; --gradio: #ff6b6b;
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -709,10 +568,9 @@ function serveFrontend(domain) {
     }
     .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
     header { text-align: center; padding: 3rem 0; border-bottom: 1px solid var(--border); margin-bottom: 2rem; }
-    .logo { font-size: 3rem; margin-bottom: 0.5rem; }
     h1 {
       font-size: 2.5rem;
-      background: linear-gradient(135deg, var(--accent), var(--purple));
+      background: linear-gradient(135deg, var(--accent), var(--accent-light));
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
       margin-bottom: 0.5rem;
     }
@@ -727,12 +585,13 @@ function serveFrontend(domain) {
     .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 1rem; padding: 2rem; margin-bottom: 2rem; }
     .card h2 { font-size: 1.5rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
     .input-group { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
-    input[type="text"], select {
-      flex: 1; padding: 0.75rem 1rem; background: var(--bg); border: 1px solid var(--border);
+    input[type="text"], select, textarea {
+      flex: 1; min-width: 200px; padding: 0.75rem 1rem; background: var(--bg); border: 1px solid var(--border);
       border-radius: 0.5rem; color: var(--text); font-size: 1rem; outline: none; transition: border-color 0.2s;
-      min-width: 200px;
+      font-family: inherit;
     }
-    input[type="text"]:focus, select:focus { border-color: var(--accent); }
+    input[type="text"]:focus, select:focus, textarea:focus { border-color: var(--accent); }
+    textarea { min-height: 120px; resize: vertical; font-family: monospace; }
     button {
       padding: 0.75rem 1.5rem; background: linear-gradient(135deg, var(--accent), #d97706);
       color: white; border: none; border-radius: 0.5rem; font-size: 1rem; font-weight: 600;
@@ -742,19 +601,17 @@ function serveFrontend(domain) {
     button:active { transform: translateY(0); }
     button.secondary { background: var(--bg-hover); }
     button.secondary:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
-    button.gradio { background: linear-gradient(135deg, #ff6b6b, #ee5a5a); }
-    button.gradio:hover { box-shadow: 0 4px 12px rgba(255,107,107,0.3); }
     button.info { background: linear-gradient(135deg, var(--info), #2563eb); }
     button.info:hover { box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
-    button.purple { background: linear-gradient(135deg, var(--purple), #7c3aed); }
-    button.purple:hover { box-shadow: 0 4px 12px rgba(139,92,246,0.3); }
+    button.gradio { background: linear-gradient(135deg, var(--gradio), #ee5a5a); }
+    button.gradio:hover { box-shadow: 0 4px 12px rgba(255,107,107,0.3); }
     .url-display {
       background: var(--bg); padding: 1rem; border-radius: 0.5rem;
       font-family: 'Courier New', monospace; font-size: 0.9rem; word-break: break-all;
       border: 1px solid var(--border); margin-bottom: 1rem; position: relative;
     }
     .copy-btn { position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); padding: 0.25rem 0.75rem; font-size: 0.8rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
     .feature-card {
       background: var(--bg-card); border: 1px solid var(--border); border-radius: 1rem;
       padding: 1.5rem; transition: transform 0.2s, border-color 0.2s;
@@ -771,23 +628,28 @@ function serveFrontend(domain) {
     .code-block .comment { color: #8b949e; }
     .code-block .string { color: #a5d6ff; }
     .code-block .keyword { color: #ff7b72; }
-    .code-block .function { color: #d2a8ff; }
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; flex-wrap: wrap; }
+    .tab { padding: 0.5rem 1rem; background: none; border: none; color: var(--text-muted); cursor: pointer; border-radius: 0.25rem; font-size: 0.9rem; }
+    .tab.active { background: var(--bg-hover); color: var(--text); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
     .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 1rem; font-size: 0.8rem; font-weight: 600; margin-left: 0.5rem; }
-    .badge-new { background: var(--purple); color: white; }
+    .badge-new { background: var(--gradio); color: white; }
     .badge-v5 { background: var(--info); color: white; }
-    .badge-hf { background: #ff6b6b; color: white; }
-    .footer { text-align: center; padding: 2rem; color: var(--text-muted); border-top: 1px solid var(--border); margin-top: 2rem; }
+    .warning-box { background: rgba(245,158,11,0.1); border: 1px solid var(--warning); border-radius: 0.5rem; padding: 1rem; margin: 1rem 0; }
+    .warning-box p { color: var(--text); font-size: 0.95rem; }
+    .mode-switch { display: flex; gap: 1rem; margin-bottom: 1rem; justify-content: center; }
+    .mode-btn { padding: 0.5rem 1.5rem; border-radius: 2rem; border: 2px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.2s; }
+    .mode-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(245,158,11,0.1); }
+    .section { display: none; }
+    .section.active { display: block; }
+    footer { text-align: center; padding: 2rem; color: var(--text-muted); border-top: 1px solid var(--border); margin-top: 2rem; }
     .toast {
       position: fixed; bottom: 2rem; right: 2rem; background: var(--success); color: white;
       padding: 1rem 1.5rem; border-radius: 0.5rem; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
       transform: translateY(100px); opacity: 0; transition: all 0.3s; z-index: 1000;
     }
     .toast.show { transform: translateY(0); opacity: 1; }
-    .changelog { background: var(--bg); padding: 1rem; border-radius: 0.5rem; margin-top: 1rem; }
-    .changelog li { color: var(--text-muted); margin: 0.5rem 0; }
-    .changelog li strong { color: var(--accent-light); }
-    .warning-box { background: rgba(245,158,11,0.1); border: 1px solid var(--warning); border-radius: 0.5rem; padding: 1rem; margin: 1rem 0; }
-    .warning-box p { color: var(--text); font-size: 0.95rem; }
     @media (max-width: 768px) {
       .container { padding: 1rem; } h1 { font-size: 1.8rem; }
       .input-group { flex-direction: column; } .grid { grid-template-columns: 1fr; }
@@ -797,195 +659,294 @@ function serveFrontend(domain) {
 <body>
   <div class="container">
     <header>
-      <div class="logo">🌐</div>
-      <h1>通用网站代理 <span class="badge badge-v5">v5.1</span></h1>
-      <p class="subtitle">代理任意网站 | 完整支持 Hugging Face 生态 | 增强 DNS 解析</p>
+      <div class="logo" style="font-size: 3rem; margin-bottom: 0.5rem;">🌐</div>
+      <h1>Universal Web Proxy <span class="badge badge-v5">v5.0</span></h1>
+      <p class="subtitle">通用网站代理 + Hugging Face 专用代理</p>
       <div class="status-badge">
         <span class="status-dot"></span>
         <span id="statusText">服务运行中</span>
       </div>
     </header>
 
-    <!-- 通用代理 -->
-    <div class="card">
-      <h2>🔗 代理任意网站</h2>
-      <p style="color: var(--text-muted); margin-bottom: 1rem;">
-        输入要代理的 URL，即可通过本服务访问。支持自动重试和 DNS 备用解析。
-      </p>
-      <div class="input-group">
-        <input type="text" id="genericUrl" placeholder="https://example.com" value="https://example.com">
-        <button class="purple" onclick="goToGeneric()">🚀 访问</button>
-        <button class="secondary" onclick="copyGenericUrl()">📋 复制链接</button>
+    <div class="mode-switch">
+      <button class="mode-btn active" onclick="switchMode('generic')">🌍 通用代理</button>
+      <button class="mode-btn" onclick="switchMode('hf')">🤗 Hugging Face</button>
+    </div>
+
+    <!-- 通用代理面板 -->
+    <div id="generic-panel" class="section active">
+      <div class="card">
+        <h2>🌍 通用网站代理</h2>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+          输入任意网站 URL，通过代理访问。支持 HTML 页面、API、静态资源等。
+        </p>
+        <div class="warning-box">
+          <p>⚠️ <strong>注意：</strong>部分网站可能有反代理机制（如 Cloudflare 5秒盾、CSP 等），代理可能无法完全正常工作。</p>
+        </div>
+        <div class="input-group">
+          <input type="text" id="genericUrl" placeholder="https://example.com 或 example.com/path" style="flex: 3;">
+          <button onclick="goToGeneric()">🚀 访问</button>
+          <button class="secondary" onclick="copyGenericUrl()">📋 复制</button>
+        </div>
+        <div class="url-display" id="genericUrlDisplay">
+          <span id="genericGeneratedUrl">${domain}/proxy/example.com</span>
+          <button class="copy-btn secondary" onclick="copyGenericGenerated()">复制</button>
+        </div>
+        
+        <h3 style="margin: 1.5rem 0 0.5rem; font-size: 1rem;">使用方式：</h3>
+        <div class="code-block">
+<span class="comment"># 方式1：路径形式</span>
+${domain}/proxy/example.com
+${domain}/proxy/example.com/path/to/page
+
+<span class="comment"># 方式2：查询参数形式</span>
+${domain}/proxy/?target=https://example.com
+${domain}/?target=https://example.com
+
+<span class="comment"># 方式3：API 调用</span>
+curl ${domain}/proxy/api.github.com/users/octocat
+        </div>
       </div>
-      <div class="url-display">
-        <span id="genericUrlDisplay">${domain}/proxy/https://example.com</span>
-        <button class="copy-btn secondary" onclick="copyGeneratedUrl()">复制</button>
-      </div>
-      <div class="warning-box">
-        <p>💡 <strong>提示：</strong>如果遇到 Cloudflare Error 1016（DNS 解析失败），代理会自动尝试备用 DNS 解析。如果仍然失败，请检查目标域名是否正确。</p>
+
+      <div class="card">
+        <h2>🔧 高级选项</h2>
+        <div class="input-group">
+          <textarea id="customHeaders" placeholder='自定义请求头 (JSON 格式，可选)
+例如: {"Authorization": "Bearer token123", "X-Custom":Custom": "value"}'></textarea>
+        </div>
+        <div class="input-group">
+          <label style="color: var(--text-muted); display: flex; align-items: center; gap: 0.5rem;">
+            <input type="checkbox" id="disableRewrite" style="width: auto;"> 
+            禁用内容重写（保留原始链接）
+          </label>
+        </div>
       </div>
     </div>
 
-    <!-- Hugging Face 代理 -->
-    <div class="card">
-      <h2>🤗 Hugging Face 代理 <span class="badge badge-hf">HF</span></h2>
-      <div class="input-group">
-        <select id="resourceType">
-          <option value="models">模型 (models)</option>
-          <option value="datasets">数据集 (datasets)</option>
-          <option value="spaces">Spaces</option>
-        </select>
-        <input type="text" id="resourcePath" placeholder="例如: bert-base-chinese 或 microsoft/DialoGPT-medium">
+    <!-- Hugging Face 面板 -->
+    <div id="hf-panel" class="section">
+      <div class="card">
+        <h2>🚀 快速访问 Hugging Face</h2>
+        <div class="input-group">
+          <select id="resourceType">
+            <option value="models">模型 (models)</option>
+            <option value="datasets">数据集 (datasets)</option>
+            <option value="spaces">Spaces</option>
+          </select>
+          <input type="text" id="resourcePath" placeholder="例如: bert-base-chinese 或 microsoft/DialoGPT-medium">
+        </div>
+        <div class="input-group">
+          <button onclick="goToResource()">🚀 访问</button>
+          <button class="secondary" onclick="copyUrl()">📋 复制链接</button>
+        </div>
+        <div class="url-display" id="urlDisplay">
+          <span id="generatedUrl">${domain}/models/bert-base-chinese</span>
+          <button class="copy-btn secondary" onclick="copyGeneratedUrl()">复制</button>
+        </div>
       </div>
-      <div class="input-group">
-        <button onclick="goToResource()">🚀 访问</button>
-        <button class="secondary" onclick="copyUrl()">📋 复制链接</button>
+
+      <div class="card">
+        <h2>🔐 登录 / 注册</h2>
+        <div class="input-group">
+          <button class="info" onclick="window.open('${domain}/login', '_blank')">🔑 登录</button>
+          <button class="info" onclick="window.open('${domain}/join', '_blank')">✨ 注册</button>
+          <button class="secondary" onclick="window.open('${domain}/settings/profile', '_blank')">⚙️ 设置</button>
+        </div>
       </div>
-      <div class="url-display">
-        <span id="hfUrlDisplay">${domain}/models/bert-base-chinese</span>
-        <button class="copy-btn secondary" onclick="copyHfUrl()">复制</button>
+
+      <div class="card">
+        <h2>🎨 Gradio Space 代理</h2>
+        <div class="input-group">
+          <input type="text" id="spacePath" placeholder="username/space-name" style="flex: 1;">
+          <button class="gradio" onclick="goToSpace()">🚀 访问 Space</button>
+        </div>
+        <div class="url-display">
+          <span id="spaceUrl">${domain}/spaces/username/space-name</span>
+          <button class="copy-btn secondary" onclick="copySpaceUrl()">复制</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>💻 使用示例</h2>
+        <div class="tabs">
+          <button class="tab active" onclick="switchTab('python')">Python</button>
+          <button class="tab" onclick="switchTab('curl')">cURL</button>
+          <button class="tab" onclick="switchTab('js')">JavaScript</button>
+          <button class="tab" onclick="switchTab('git')">Git</button>
+          <button class="tab" onclick="switchTab('gradio')">Gradio</button>
+        </div>
+        <div id="python" class="tab-content active">
+          <div class="code-block">
+<span class="comment"># 使用 transformers</span>
+<span class="keyword">from</span> transformers <span class="keyword">import</span> AutoModel
+<span class="keyword">import</span> os
+os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"${domain}"</span>
+model = AutoModel.from_pretrained(<span class="string">"bert-base-chinese"</span>)
+          </div>
+        </div>
+        <div id="curl" class="tab-content">
+          <div class="code-block">
+<span class="comment"># 下载模型</span>
+curl -L <span class="string">"${domain}/bert-base-chinese/resolve/main/config.json"</span>
+
+<span class="comment"># 通用代理</span>
+curl -L <span class="string">"${domain}/proxy/api.github.com"</span>
+          </div>
+        </div>
+        <div id="js" class="tab-content">
+          <div class="code-block">
+<span class="comment">// 调用推理 API</span>
+<span class="keyword">const</span> res = <span class="keyword">await</span> fetch(<span class="string">'${domain}/pipeline/sentiment-analysis/...'</span>, {
+  method: <span class="string">'POST'</span>,
+  headers: { <span class="string">'Content-Type'</span>: <span class="string">'application/json'</span> },
+  body: <span class="string">JSON.stringify({ inputs: "Hello!" })</span>
+});
+          </div>
+        </div>
+        <div id="git" class="tab-content">
+          <div class="code-block">
+<span class="keyword">export</span> HF_ENDPOINT=${domain}
+git clone ${domain}/bert-base-chinese
+          </div>
+        </div>
+        <div id="gradio" class="tab-content">
+          <div class="code-block">
+<span class="keyword">from</span> gradio_client <span class="keyword">import</span> Client
+<span class="keyword">import</span> os
+os.environ[<span class="string">"HF_ENDPOINT"</span>] = <span class="string">"${domain}"</span>
+client = Client(<span class="string">"username/space-name"</span>)
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- 更新日志 -->
-    <div class="card">
-      <h2>📝 更新日志</h2>
-      <ul class="changelog">
-        <li><strong>v5.1</strong> — 增强 DNS 解析：自动重试、备用 DoH 解析、Cloudflare 错误检测</li>
-        <li><strong>v5.0</strong> — 升级为通用代理，支持任意网站，保留 HF 完整支持</li>
-        <li><strong>v4.2</strong> — 修复"重新发送数据"弹窗：fetch 改为 manual 模式</li>
-        <li><strong>v4.1</strong> — 修复 Login/Signup POST 302→303 转换</li>
-        <li><strong>v4.0</strong> — 全面修复 Login/Signup/OAuth 支持</li>
-      </ul>
-    </div>
-
-    <!-- 功能卡片 -->
     <div class="grid">
       <div class="feature-card">
-        <div class="feature-icon">🌐</div>
-        <h3>通用代理</h3>
-        <p>代理任意 HTTP/HTTPS 网站，自动重写链接和 Cookie</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔄</div>
-        <h3>智能重试</h3>
-        <p>DNS 解析失败自动重试，支持备用 DNS 解析 (DoH)</p>
+        <div class="feature-icon">🌍</div>
+        <h3>通用代理 <span class="badge badge-v5">NEW</span></h3>
+        <p>支持代理任意网站，自动重写页面中的链接，保持浏览连贯性。</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">⚡</div>
-        <h3>HF 加速</h3>
-        <p>通过全球 CDN 网络加速 Hugging Face 模型和数据集下载</p>
+        <h3>HF 加速下载</h3>
+        <p>通过 Cloudflare CDN 加速模型和数据集下载。</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🎨</div>
-        <h3>Gradio Space</h3>
-        <p>完整支持 Gradio Space，包括 WebSocket、SSE 流式传输</p>
+        <h3>Gradio Space 代理</h3>
+        <p>支持 WebSocket、SSE 流式传输和文件上传。</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🔐</div>
-        <h3>登录支持</h3>
-        <p>支持任意网站的登录、Cookie 保持和会话管理</p>
+        <h3>登录 / OAuth</h3>
+        <p>完整支持 HF 登录、注册、OAuth 授权流程。</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">📡</div>
-        <h3>WebSocket</h3>
-        <p>支持 WebSocket 连接代理，适用于实时应用</p>
+        <div class="feature-icon">🍪</div>
+        <h3>Cookie 重写</h3>
+        <p>自动重写 Set-Cookie 中的 Domain 属性。</p>
       </div>
-    </div>
-
-    <!-- 使用示例 -->
-    <div class="card">
-      <h2>💻 使用示例</h2>
-      <div class="code-block">
-<span class="comment"># 代理任意网站</span>
-${domain}/proxy/https://example.com/path
-
-<span class="comment"># 代理 Hugging Face 模型</span>
-${domain}/models/bert-base-chinese
-
-<span class="comment"># 代理 Hugging Face Space</span>
-${domain}/spaces/username/space-name
-
-<span class="comment"># 调用 Gradio Space API</span>
-${domain}/spaces/username/space-name/gradio_api/call/predict
-
-<span class="comment"># 使用环境变量</span>
-<span class="keyword">export</span> HF_ENDPOINT=${domain}
-
-<span class="comment"># 解决 Cloudflare Error 1016 的备用方案</span>
-<span class="comment"># 如果遇到 DNS 解析失败，可以尝试直接使用 IP</span>
-${domain}/proxy/http://[IP地址]/path
+      <div class="feature-card">
+        <div class="feature-icon">🔗</div>
+        <h3>智能重定向</h3>
+        <p>POST 302→303 转换，防止"重新发送数据"弹窗。</p>
       </div>
     </div>
   </div>
 
-  <div class="footer">
+  <footer>
     <p>Made with ❤️ | 基于 Cloudflare Workers 构建</p>
-    <p style="margin-top: 0.5rem; font-size: 0.9rem;">此服务仅供学习和研究使用</p>
-  </div>
+    <p style="margin-top: 0.5rem; font-size: 0.9rem;">仅供学习和研究使用</p>
+  </footer>
 
   <div class="toast" id="toast">已复制到剪贴板！</div>
 
   <script>
     const domain = window.location.origin;
     
+    function switchMode(mode) {
+      document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+      event.target.classList.add('active');
+      document.getElementById(mode + '-panel').classList.add('active');
+    }
+    
     // 通用代理
     function updateGenericUrl() {
-      const url = document.getElementById('genericUrl').value.trim() || 'https://example.com';
-      document.getElementById('genericUrlDisplay').textContent = domain + '/proxy/' + url;
+      const url = document.getElementById('genericUrl').value.trim() || 'example.com';
+      const cleanUrl = url.replace(/^https?:\\/\\//, '');
+      document.getElementById('genericGeneratedUrl').textContent = domain + '/proxy/' + cleanUrl;
     }
-    
     function goToGeneric() {
       const url = document.getElementById('genericUrl').value.trim();
-      if (!url) { showToast('请输入 URL'); return; }
-      window.open(domain + '/proxy/' + url, '_blank');
+      if (!url) { showToast('请输入目标 URL'); return; }
+      const cleanUrl = url.replace(/^https?:\\/\\//, '');
+      window.open(domain + '/proxy/' + cleanUrl, '_blank');
     }
-    
     function copyGenericUrl() {
-      const url = document.getElementById('genericUrl').value.trim() || 'https://example.com';
-      navigator.clipboard.writeText(domain + '/proxy/' + url);
+      const url = document.getElementById('genericUrl').value.trim() || 'example.com';
+      const cleanUrl = url.replace(/^https?:\\/\\//, '');
+      navigator.clipboard.writeText(domain + '/proxy/' + cleanUrl);
+      showToast('链接已复制！');
+    }
+    function copyGenericGenerated() {
+      navigator.clipboard.writeText(document.getElementById('genericGeneratedUrl').textContent);
       showToast('链接已复制！');
     }
     
     // HF 代理
-    function updateHfUrl() {
+    function updateUrl() {
       const type = document.getElementById('resourceType').value;
       const path = document.getElementById('resourcePath').value.trim() || 'bert-base-chinese';
-      document.getElementById('hfUrlDisplay').textContent = domain + '/' + type + '/' + path;
+      document.getElementById('generatedUrl').textContent = domain + '/' + type + '/' + path;
     }
-    
+    function updateSpaceUrl() {
+      const path = document.getElementById('spacePath').value.trim() || 'username/space-name';
+      document.getElementById('spaceUrl').textContent = domain + '/spaces/' + path;
+    }
     function goToResource() {
       const type = document.getElementById('resourceType').value;
       const path = document.getElementById('resourcePath').value.trim();
       if (!path) { showToast('请输入资源路径'); return; }
       window.open(domain + '/' + type + '/' + path, '_blank');
     }
-    
-    function copyHfUrl() {
+    function goToSpace() {
+      const path = document.getElementById('spacePath').value.trim();
+      if (!path) { showToast('请输入 Space 路径'); return; }
+      window.open(domain + '/spaces/' + path, '_blank');
+    }
+    function copyUrl() {
       const type = document.getElementById('resourceType').value;
       const path = document.getElementById('resourcePath').value.trim() || 'bert-base-chinese';
       navigator.clipboard.writeText(domain + '/' + type + '/' + path);
       showToast('链接已复制！');
     }
-    
+    function copySpaceUrl() {
+      const path = document.getElementById('spacePath').value.trim() || 'username/space-name';
+      navigator.clipboard.writeText(domain + '/spaces/' + path);
+      showToast('Space 链接已复制！');
+    }
     function copyGeneratedUrl() {
-      const text = document.getElementById('genericUrlDisplay').textContent;
-      navigator.clipboard.writeText(text);
+      navigator.clipboard.writeText(document.getElementById('generatedUrl').textContent);
       showToast('链接已复制！');
     }
-    
     function showToast(msg) {
       const t = document.getElementById('toast');
       t.textContent = msg; t.classList.add('show');
       setTimeout(() => t.classList.remove('show'), 2000);
     }
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      document.getElementById(name).classList.add('active');
+    }
     
-    // 事件绑定
     document.getElementById('genericUrl').addEventListener('input', updateGenericUrl);
-    document.getElementById('resourceType').addEventListener('change', updateHfUrl);
-    document.getElementById('resourcePath').addEventListener('input', updateHfUrl);
+    document.getElementById('resourceType').addEventListener('change', updateUrl);
+    document.getElementById('resourcePath').addEventListener('input', updateUrl);
+    document.getElementById('spacePath').addEventListener('input', updateSpaceUrl);
     
-    // 健康检查
     fetch('/health').then(r => r.json()).then(() => {
       document.getElementById('statusText').textContent = '服务运行中';
     }).catch(() => {
@@ -993,17 +954,7 @@ ${domain}/proxy/http://[IP地址]/path
       document.querySelector('.status-dot').style.background = 'var(--error)';
     });
     
-    // 初始化
-    updateGenericUrl();
-    updateHfUrl();
-    
-    // 回车键支持
-    document.getElementById('genericUrl').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') goToGeneric();
-    });
-    document.getElementById('resourcePath').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') goToResource();
-    });
+    updateGenericUrl(); updateUrl(); updateSpaceUrl();
   </script>
 </body>
 </html>`;
@@ -1018,6 +969,14 @@ ${domain}/proxy/http://[IP地址]/path
 
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+    
+    // 根路径返回前端页面
+    if (pathname === '/' || pathname === '/index.html') {
+      return serveFrontend(url.hostname);
+    }
+    
     return handleRequest(request, env);
   },
 };
