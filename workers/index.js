@@ -1,7 +1,7 @@
 /**
- * 通用网站代理服务 — 终极版 v5.0
+ * 通用网站代理服务 — 终极版 v5.1
  * 支持任意网站代理，保留HF特殊处理
- * 修复: redirect:manual 防止 fetch 自动跟随重定向
+ * 增强 DNS 解析和错误处理
  */
 
 // ==================== 配置 ====================
@@ -12,6 +12,14 @@ const CONFIG = {
   allowAnyTarget: true,
   // 黑名单域名（禁止代理的网站）
   blacklist: ['localhost', '127.0.0.1', '::1', 'internal'],
+  // 超时设置（毫秒）
+  timeout: 30000,
+  // 重试次数
+  retries: 2,
+  // 备用 DNS 解析（用于某些被 Cloudflare 屏蔽的域名）
+  fallbackIPs: {
+    // 'windscrepo.com': '1.2.3.4', // 如果有 IP 可以添加
+  },
   // 需要特殊处理的域名
   specialDomains: {
     'huggingface.co': { type: 'hf' },
@@ -113,6 +121,25 @@ function isGradioBackend(rest) {
          rest === '/theme.css';
 }
 
+function isBlacklisted(hostname) {
+  return CONFIG.blacklist.some(domain => 
+    hostname === domain || hostname.endsWith('.' + domain)
+  );
+}
+
+function getTargetFromPath(pathname) {
+  const match = pathname.match(/^\/proxy\/(https?:\/\/[^\/]+)(\/.*)?$/);
+  if (match) {
+    const url = new URL(match[1]);
+    return {
+      host: url.hostname,
+      path: match[2] || '/',
+      protocol: url.protocol,
+    };
+  }
+  return null;
+}
+
 // ==================== 内容重写函数 ====================
 
 // HF Space 内容重写
@@ -198,8 +225,6 @@ function rewriteAllHfDomains(text, proxyHost) {
   return text;
 }
 
-// ==================== 通用内容重写 ====================
-
 function rewriteGenericContent(text, proxyHost, targetHost) {
   if (!text || typeof text !== 'string') return text;
   
@@ -225,128 +250,244 @@ function rewriteSetCookie(headerValue, proxyHost) {
   );
 }
 
+// ==================== 备用 DNS 解析方案 ====================
+
+async function tryFallbackResolution(targetUrl, targetHost) {
+  // 如果有配置备用 IP，尝试使用 IP 访问
+  if (CONFIG.fallbackIPs[targetHost]) {
+    const ip = CONFIG.fallbackIPs[targetHost];
+    const url = new URL(targetUrl);
+    url.hostname = ip;
+    url.host = ip;
+    // 添加 Host 头，让服务器知道真正的域名
+    return url.toString();
+  }
+
+  // 尝试通过 DNS over HTTPS 解析
+  try {
+    const dnsResult = await fetch(
+      `https://cloudflare-dns.com/dns-query?name=${targetHost}&type=A`,
+      {
+        headers: {
+          'Accept': 'application/dns-json',
+        },
+      }
+    );
+    const data = await dnsResult.json();
+    if (data.Answer && data.Answer.length > 0) {
+      const ip = data.Answer[0].data;
+      const url = new URL(targetUrl);
+      url.hostname = ip;
+      url.host = ip;
+      return url.toString();
+    }
+  } catch (e) {
+    // DNS 查询失败，忽略
+  }
+
+  return null;
+}
+
 // ==================== 核心代理函数 ====================
 
 async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn) {
   const proxyHeaders = buildProxyHeaders(request, targetHost, proxyHost);
   const origin = request.headers.get('Origin') || '*';
 
-  try {
-    const proxyReq = new Request(targetUrl, {
-      method: request.method,
-      headers: proxyHeaders,
-      body: request.body,
-      redirect: 'manual',
-    });
+  // 重试逻辑
+  let lastError = null;
+  for (let attempt = 0; attempt <= CONFIG.retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), CONFIG.timeout);
 
-    const response = await fetch(proxyReq);
-    const respHeaders = new Headers(response.headers);
-    Object.entries(getCorsHeaders(origin)).forEach(([k, v]) => respHeaders.set(k, v));
+      const proxyReq = new Request(targetUrl, {
+        method: request.method,
+        headers: proxyHeaders,
+        body: request.body,
+        redirect: 'manual',
+        signal: controller.signal,
+      });
 
-    // Cookie 重写
-    if (respHeaders.getAll) {
-      const cookies = respHeaders.getAll('Set-Cookie');
-      if (cookies && cookies.length > 0) {
-        respHeaders.delete('Set-Cookie');
-        for (const cookie of cookies) {
-          respHeaders.append('Set-Cookie', rewriteSetCookie(cookie, proxyHost));
-        }
-      }
-    } else {
-      const setCookie = respHeaders.get('Set-Cookie');
-      if (setCookie) {
-        respHeaders.set('Set-Cookie', rewriteSetCookie(setCookie, proxyHost));
-      }
-    }
+      const response = await fetch(proxyReq);
+      clearTimeout(timeoutId);
 
-    // 重定向处理
-    if (response.status >= 300 && response.status < 400) {
-      const loc = respHeaders.get('Location');
-      if (loc) {
-        try {
-          const locUrl = new URL(loc, targetUrl);
-          // 如果重定向到代理过的域名，需要重写
-          if (isHfDomain(locUrl.hostname)) {
-            // HF 特殊处理
-            if (isSpaceDomain(locUrl.hostname)) {
-              const spaceInfo = parseSpaceSubdomain(locUrl.hostname);
-              if (spaceInfo) {
-                locUrl.pathname = `/spaces/${spaceInfo.user}/${spaceInfo.space}${locUrl.pathname}`;
-              }
+      // 检查是否是 Cloudflare 错误页面
+      try {
+        const text = await response.text();
+        if (text.includes('Error 1016') || text.includes('Cloudflare is currently unable to resolve')) {
+          // 如果是 DNS 解析错误，尝试备用方案
+          const fallbackUrl = await tryFallbackResolution(targetUrl, targetHost);
+          if (fallbackUrl) {
+            // 递归调用，使用备用 URL
+            return proxyRequest(request, fallbackUrl, targetHost, proxyHost, rewriteFn);
+          }
+          return new Response(
+            `无法解析域名: ${targetHost}\n\n` +
+            `该域名可能已被封锁或 DNS 解析失败。\n` +
+            `提示: 如果是 Cloudflare 保护的网站，可能需要在代理服务器配置 DNS 解析。\n\n` +
+            `原始错误: ${text.substring(0, 500)}...`,
+            {
+              status: 502,
+              headers: {
+                'Content-Type': 'text/plain;charset=UTF-8',
+                ...getCorsHeaders(origin),
+              },
             }
-            locUrl.hostname = proxyHost;
-            locUrl.protocol = 'https';
-            respHeaders.set('Location', locUrl.toString());
-          } else if (locUrl.hostname === targetHost) {
-            // 重定向到目标域名的，重写为代理域名
-            locUrl.hostname = proxyHost;
-            locUrl.protocol = 'https';
-            respHeaders.set('Location', locUrl.toString());
+          );
+        }
+
+        // 如果响应是 Cloudflare 错误页面，但内容被截断，尝试重新获取
+        if (response.status === 502 || response.status === 503) {
+          if (text.includes('Cloudflare') || text.includes('Error 1')) {
+            return new Response(
+              `代理目标 ${targetHost} 返回了 Cloudflare 错误。\n` +
+              `状态码: ${response.status}\n` +
+              `这可能是因为目标网站使用了 Cloudflare 且无法正确解析。\n\n` +
+              `建议:\n` +
+              `1. 检查目标域名是否正确\n` +
+              `2. 尝试使用 IP 地址直接访问\n` +
+              `3. 稍后重试\n`,
+              {
+                status: 502,
+                headers: {
+                  'Content-Type': 'text/plain;charset=UTF-8',
+                  ...getCorsHeaders(origin),
+                },
+              }
+            );
           }
-        } catch (e) {
-          // 简单的字符串替换
-          if (loc.startsWith('http')) {
-            const newLoc = loc.replace(/https?:\/\/[^\/]+/, `https://${proxyHost}`);
-            respHeaders.set('Location', newLoc);
+          // 如果不是 Cloudflare 错误，继续处理
+          return processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, text);
+        }
+
+        // 正常处理响应
+        return processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, text);
+
+      } catch (e) {
+        // 如果读取响应体失败，尝试直接返回
+        return processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, null);
+      }
+
+    } catch (err) {
+      lastError = err;
+      if (attempt < CONFIG.retries) {
+        // 等待后重试
+        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+
+  // 所有重试都失败
+  return jsonResponse({
+    error: 'Proxy Error',
+    message: `无法连接到目标服务器: ${targetHost}`,
+    details: lastError ? lastError.message : 'Unknown error',
+    suggestion: '请检查目标域名是否正确，或尝试使用 /proxy/https://example.com 格式',
+  }, 502);
+}
+
+// ==================== 响应处理函数 ====================
+
+async function processResponse(response, request, targetHost, proxyHost, rewriteFn, origin, bodyText) {
+  const respHeaders = new Headers(response.headers);
+  Object.entries(getCorsHeaders(origin)).forEach(([k, v]) => respHeaders.set(k, v));
+
+  // Cookie 重写
+  if (respHeaders.getAll) {
+    const cookies = respHeaders.getAll('Set-Cookie');
+    if (cookies && cookies.length > 0) {
+      respHeaders.delete('Set-Cookie');
+      for (const cookie of cookies) {
+        respHeaders.append('Set-Cookie', rewriteSetCookie(cookie, proxyHost));
+      }
+    }
+  } else {
+    const setCookie = respHeaders.get('Set-Cookie');
+    if (setCookie) {
+      respHeaders.set('Set-Cookie', rewriteSetCookie(setCookie, proxyHost));
+    }
+  }
+
+  // 重定向处理
+  if (response.status >= 300 && response.status < 400) {
+    const loc = respHeaders.get('Location');
+    if (loc) {
+      try {
+        const locUrl = new URL(loc, `https://${targetHost}`);
+        if (isHfDomain(locUrl.hostname)) {
+          if (isSpaceDomain(locUrl.hostname)) {
+            const spaceInfo = parseSpaceSubdomain(locUrl.hostname);
+            if (spaceInfo) {
+              locUrl.pathname = `/spaces/${spaceInfo.user}/${spaceInfo.space}${locUrl.pathname}`;
+            }
           }
+          locUrl.hostname = proxyHost;
+          locUrl.protocol = 'https';
+          respHeaders.set('Location', locUrl.toString());
+        } else if (locUrl.hostname === targetHost) {
+          locUrl.hostname = proxyHost;
+          locUrl.protocol = 'https';
+          respHeaders.set('Location', locUrl.toString());
+        }
+      } catch (e) {
+        if (loc.startsWith('http')) {
+          const newLoc = loc.replace(/https?:\/\/[^\/]+/, `https://${proxyHost}`);
+          respHeaders.set('Location', newLoc);
         }
       }
-
-      // POST 302 -> 303 转换
-      let finalStatus = response.status;
-      if (request.method === 'POST' && response.status === 302) {
-        finalStatus = 303;
-      }
-
-      return new Response(response.body, {
-        status: finalStatus,
-        statusText: response.statusText,
-        headers: respHeaders,
-      });
     }
 
-    // 删除安全头部
-    respHeaders.delete('Content-Security-Policy');
-    respHeaders.delete('X-Frame-Options');
-    respHeaders.delete('Strict-Transport-Security');
-    respHeaders.delete('Expect-CT');
-    respHeaders.delete('Report-To');
-    respHeaders.delete('NEL');
-
-    const ct = respHeaders.get('Content-Type') || '';
-    const isText = ct.includes('text/') ||
-                   ct.includes('application/javascript') ||
-                   ct.includes('application/json') ||
-                   ct.includes('application/xml') ||
-                   ct.includes('application/xhtml');
-
-    const isStream = ct.includes('text/event-stream') ||
-                     ct.includes('application/octet-stream') ||
-                     ct.includes('video/') ||
-                     ct.includes('audio/') ||
-                     ct.includes('image/');
-
-    if (rewriteFn && isText && !isStream) {
-      const text = await response.text();
-      const rewritten = rewriteFn(text);
-      respHeaders.delete('Content-Length');
-      return new Response(rewritten, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: respHeaders,
-      });
+    let finalStatus = response.status;
+    if (request.method === 'POST' && response.status === 302) {
+      finalStatus = 303;
     }
 
     return new Response(response.body, {
+      status: finalStatus,
+      statusText: response.statusText,
+      headers: respHeaders,
+    });
+  }
+
+  // 删除安全头部
+  respHeaders.delete('Content-Security-Policy');
+  respHeaders.delete('X-Frame-Options');
+  respHeaders.delete('Strict-Transport-Security');
+  respHeaders.delete('Expect-CT');
+  respHeaders.delete('Report-To');
+  respHeaders.delete('NEL');
+
+  const ct = respHeaders.get('Content-Type') || '';
+  const isText = ct.includes('text/') ||
+                 ct.includes('application/javascript') ||
+                 ct.includes('application/json') ||
+                 ct.includes('application/xml') ||
+                 ct.includes('application/xhtml');
+
+  const isStream = ct.includes('text/event-stream') ||
+                   ct.includes('application/octet-stream') ||
+                   ct.includes('video/') ||
+                   ct.includes('audio/') ||
+                   ct.includes('image/');
+
+  if (rewriteFn && isText && !isStream) {
+    const text = bodyText !== null ? bodyText : await response.text();
+    const rewritten = rewriteFn(text);
+    respHeaders.delete('Content-Length');
+    return new Response(rewritten, {
       status: response.status,
       statusText: response.statusText,
       headers: respHeaders,
     });
-
-  } catch (err) {
-    console.error('Proxy error:', err);
-    return jsonResponse({ error: 'Proxy Error', message: err.message }, 502);
   }
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: respHeaders,
+  });
 }
 
 async function proxyWebSocket(request, targetWsUrl) {
@@ -391,27 +532,6 @@ function jsonResponse(data, status = 200) {
 
 // ==================== 路由处理 ====================
 
-function getTargetFromPath(pathname) {
-  // 格式: /proxy/https://example.com/path
-  const match = pathname.match(/^\/proxy\/(https?:\/\/[^\/]+)(\/.*)?$/);
-  if (match) {
-    const url = new URL(match[1]);
-    return {
-      host: url.hostname,
-      path: match[2] || '/',
-      protocol: url.protocol,
-    };
-  }
-  return null;
-}
-
-// 检查域名是否在黑名单中
-function isBlacklisted(hostname) {
-  return CONFIG.blacklist.some(domain => 
-    hostname === domain || hostname.endsWith('.' + domain)
-  );
-}
-
 async function handleRequest(request, env) {
   const url = new URL(request.url);
   const pathname = url.pathname;
@@ -432,8 +552,8 @@ async function handleRequest(request, env) {
     return jsonResponse({ 
       status: 'ok', 
       timestamp: new Date().toISOString(),
-      version: '5.0.0',
-      features: ['generic-proxy', 'hf-special', 'websocket', 'sse']
+      version: '5.1.0',
+      features: ['generic-proxy', 'hf-special', 'websocket', 'sse', 'dns-fallback']
     });
   }
 
@@ -441,8 +561,8 @@ async function handleRequest(request, env) {
   if (pathname === '/api/info') {
     return jsonResponse({
       name: 'Universal Proxy Service',
-      version: '5.0.0',
-      description: '代理任意网站，同时保留 Hugging Face 特殊处理',
+      version: '5.1.0',
+      description: '代理任意网站，增强 DNS 解析和错误处理',
       usage: {
         '代理任意网站': '/proxy/https://example.com/path',
         '代理 Hugging Face': '/models/*, /datasets/*, /spaces/*',
@@ -450,6 +570,9 @@ async function handleRequest(request, env) {
       },
       features: [
         '任意网站代理',
+        'DNS 解析失败自动重试',
+        'Cloudflare 错误检测',
+        '备用 DNS 解析 (DoH)',
         'Hugging Face 模型/数据集下载',
         'Inference API',
         'Gradio Space 代理',
@@ -530,7 +653,14 @@ async function handleRequest(request, env) {
       return jsonResponse({ error: 'Target domain is blacklisted' }, 403);
     }
     
-    const targetUrl = makeTargetUrl(request.url, host, path + url.search);
+    // 检查是否有备用 IP 配置
+    let targetUrl;
+    if (CONFIG.fallbackIPs[host]) {
+      const ip = CONFIG.fallbackIPs[host];
+      targetUrl = `${protocol}//${ip}${path}${url.search}`;
+    } else {
+      targetUrl = makeTargetUrl(request.url, host, path + url.search);
+    }
     
     // 检查是否需要特殊处理
     let rewriteFn = null;
@@ -563,7 +693,7 @@ function serveFrontend(domain) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>通用网站代理 v5.0</title>
+  <title>通用网站代理 v5.1</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
@@ -668,8 +798,8 @@ function serveFrontend(domain) {
   <div class="container">
     <header>
       <div class="logo">🌐</div>
-      <h1>通用网站代理 <span class="badge badge-v5">v5.0</span></h1>
-      <p class="subtitle">代理任意网站 | 完整支持 Hugging Face 生态</p>
+      <h1>通用网站代理 <span class="badge badge-v5">v5.1</span></h1>
+      <p class="subtitle">代理任意网站 | 完整支持 Hugging Face 生态 | 增强 DNS 解析</p>
       <div class="status-badge">
         <span class="status-dot"></span>
         <span id="statusText">服务运行中</span>
@@ -680,7 +810,7 @@ function serveFrontend(domain) {
     <div class="card">
       <h2>🔗 代理任意网站</h2>
       <p style="color: var(--text-muted); margin-bottom: 1rem;">
-        输入要代理的 URL，即可通过本服务访问
+        输入要代理的 URL，即可通过本服务访问。支持自动重试和 DNS 备用解析。
       </p>
       <div class="input-group">
         <input type="text" id="genericUrl" placeholder="https://example.com" value="https://example.com">
@@ -690,6 +820,9 @@ function serveFrontend(domain) {
       <div class="url-display">
         <span id="genericUrlDisplay">${domain}/proxy/https://example.com</span>
         <button class="copy-btn secondary" onclick="copyGeneratedUrl()">复制</button>
+      </div>
+      <div class="warning-box">
+        <p>💡 <strong>提示：</strong>如果遇到 Cloudflare Error 1016（DNS 解析失败），代理会自动尝试备用 DNS 解析。如果仍然失败，请检查目标域名是否正确。</p>
       </div>
     </div>
 
@@ -718,11 +851,11 @@ function serveFrontend(domain) {
     <div class="card">
       <h2>📝 更新日志</h2>
       <ul class="changelog">
+        <li><strong>v5.1</strong> — 增强 DNS 解析：自动重试、备用 DoH 解析、Cloudflare 错误检测</li>
         <li><strong>v5.0</strong> — 升级为通用代理，支持任意网站，保留 HF 完整支持</li>
         <li><strong>v4.2</strong> — 修复"重新发送数据"弹窗：fetch 改为 manual 模式</li>
         <li><strong>v4.1</strong> — 修复 Login/Signup POST 302→303 转换</li>
         <li><strong>v4.0</strong> — 全面修复 Login/Signup/OAuth 支持</li>
-        <li><strong>v3.0</strong> — 重写代理逻辑，修复 Space 页面 404</li>
       </ul>
     </div>
 
@@ -732,6 +865,11 @@ function serveFrontend(domain) {
         <div class="feature-icon">🌐</div>
         <h3>通用代理</h3>
         <p>代理任意 HTTP/HTTPS 网站，自动重写链接和 Cookie</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔄</div>
+        <h3>智能重试</h3>
+        <p>DNS 解析失败自动重试，支持备用 DNS 解析 (DoH)</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">⚡</div>
@@ -747,11 +885,6 @@ function serveFrontend(domain) {
         <div class="feature-icon">🔐</div>
         <h3>登录支持</h3>
         <p>支持任意网站的登录、Cookie 保持和会话管理</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🍪</div>
-        <h3>Cookie 重写</h3>
-        <p>自动重写 Set-Cookie 中的 Domain 属性</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">📡</div>
@@ -778,6 +911,10 @@ ${domain}/spaces/username/space-name/gradio_api/call/predict
 
 <span class="comment"># 使用环境变量</span>
 <span class="keyword">export</span> HF_ENDPOINT=${domain}
+
+<span class="comment"># 解决 Cloudflare Error 1016 的备用方案</span>
+<span class="comment"># 如果遇到 DNS 解析失败，可以尝试直接使用 IP</span>
+${domain}/proxy/http://[IP地址]/path
       </div>
     </div>
   </div>
