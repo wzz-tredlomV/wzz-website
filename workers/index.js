@@ -1,6 +1,6 @@
 /**
- * 通用网站代理 + Hugging Face 专用代理 v5.0
- * 修复: serveFrontend 模板字符串冲突导致的客户端错误
+ * 通用网站代理 + Hugging Face 专用代理 v5.1
+ * 修复: 添加真实浏览器 User-Agent，处理 Cloudflare WAF 拦截
  * 支持：任意网站代理（通过 /proxy/<target>）+ 完整的 Hugging Face 代理
  */
 
@@ -14,6 +14,9 @@ const HF_API_HOSTS = {
   '/cdn/': 'cdn-lfs.huggingface.co',
   '/cdn-lfs/': 'cdn-lfs.huggingface.co',
 };
+
+// 真实浏览器 User-Agent
+const REAL_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
 
 // ==================== 工具函数 ====================
 
@@ -61,15 +64,35 @@ function makeTargetUrl(originalUrl, targetHost, pathname) {
   return u.toString();
 }
 
-function buildProxyHeaders(request, targetHost, proxyHost) {
+function buildProxyHeaders(request, targetHost, proxyHost, isGeneric) {
   const h = new Headers(request.headers);
   h.set('Host', targetHost);
   h.delete('Referer');
   h.set('Referer', 'https://' + targetHost + '/');
   h.delete('Origin');
   h.set('Origin', 'https://' + targetHost);
-  const cfHeaders = ['CF-Connecting-IP', 'CF-Visitor', 'CF-Ray', 'CF-Worker', 'CF-IPCountry', 'CF-Request-ID'];
+
+  // 对于通用代理，使用真实浏览器 User-Agent
+  if (isGeneric) {
+    h.set('User-Agent', REAL_USER_AGENT);
+    h.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
+    h.set('Accept-Language', 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7');
+    h.set('Accept-Encoding', 'gzip, deflate, br');
+    h.set('Sec-Ch-Ua', '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"');
+    h.set('Sec-Ch-Ua-Mobile', '?0');
+    h.set('Sec-Ch-Ua-Platform', '"Windows"');
+    h.set('Sec-Fetch-Dest', 'document');
+    h.set('Sec-Fetch-Mode', 'navigate');
+    h.set('Sec-Fetch-Site', 'none');
+    h.set('Sec-Fetch-User', '?1');
+    h.set('Upgrade-Insecure-Requests', '1');
+    h.set('DNT', '1');
+  }
+
+  // 删除 Cloudflare 相关头部（防止被目标识别为 Cloudflare Worker）
+  const cfHeaders = ['CF-Connecting-IP', 'CF-Visitor', 'CF-Ray', 'CF-Worker', 'CF-IPCountry', 'CF-Request-ID', 'Cf-Bot', 'Cf-Access-Jwt-Assertion'];
   for (const cfh of cfHeaders) h.delete(cfh);
+
   h.set('X-Forwarded-Host', proxyHost);
   h.set('X-Forwarded-Proto', 'https');
   const realIp = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For');
@@ -114,7 +137,7 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
   ];
   for (const rw of rewrites) {
     const escapedFrom = rw.from.replace(/[.*+?^${}()|[\]\/]/g, '\\$&');
-    const pattern = new RegExp('(["\'\\s]|^)' + escapedFrom, 'g');
+    const pattern = new RegExp('(["\'\s]|^)' + escapedFrom, 'g');
     text = text.replace(pattern, '$1' + rw.to);
   }
   const exactPaths = [
@@ -123,7 +146,7 @@ function rewriteHfSpaceContent(text, proxyHost, user, space) {
   ];
   for (const ep of exactPaths) {
     const escapedEp = ep.replace(/[.*+?^${}()|[\]\/]/g, '\\$&');
-    const pattern = new RegExp('(["\'\\s]|^)' + escapedEp + '(?=["\'\\s?&/\n]|$)', 'g');
+    const pattern = new RegExp('(["\'\s]|^)' + escapedEp + '(?=["\'\s?&/\n]|$)', 'g');
     text = text.replace(pattern, '$1' + prefix + ep);
   }
   return text;
@@ -158,25 +181,19 @@ function rewriteAllHfDomains(text, proxyHost) {
   return text;
 }
 
-/**
- * 通用内容重写：将目标域名的绝对 URL 替换为代理 URL
- */
 function rewriteGenericContent(text, targetHost, proxyHost, targetPathPrefix) {
   if (!text || typeof text !== 'string') return text;
 
   const escapedHost = targetHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  // 替换绝对 URL: https://target.com/path -> https://proxy.com/proxy/target.com/path
-  const absPattern = new RegExp('https?://' + escapedHost + '([^"\'>\\s]*)', 'g');
+  const absPattern = new RegExp('https?://' + escapedHost + '([^"\'>\s]*)', 'g');
   text = text.replace(absPattern, function(match, path) {
     return 'https://' + proxyHost + targetPathPrefix + path;
   });
 
-  // 替换协议相对 URL
-  const protoRelPattern = new RegExp('(["\'])(//' + escapedHost + '[^"\'>\\s]*)', 'g');
+  const protoRelPattern = new RegExp('(["\'])(//' + escapedHost + '[^"\'>\s]*)', 'g');
   text = text.replace(protoRelPattern, '$1//' + proxyHost + targetPathPrefix + '$2');
 
-  // 处理根路径引用
   const rootPathPattern = /((?:href|src|action)=["\'])\/([^"\']*)/g;
   text = text.replace(rootPathPattern, function(match, attr, path) {
     if (path.startsWith('proxy/') || path.startsWith('spaces/')) return match;
@@ -198,7 +215,7 @@ function rewriteSetCookie(headerValue, proxyHost) {
 
 async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn, options) {
   options = options || {};
-  const proxyHeaders = buildProxyHeaders(request, targetHost, proxyHost);
+  const proxyHeaders = buildProxyHeaders(request, targetHost, proxyHost, options.isGenericProxy);
   const origin = request.headers.get('Origin') || '*';
   const isGenericProxy = options.isGenericProxy || false;
   const targetPathPrefix = options.targetPathPrefix || '';
@@ -212,6 +229,33 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
     });
 
     const response = await fetch(proxyReq);
+
+    // 如果目标返回 403，可能是 WAF 拦截，返回详细错误信息
+    if (response.status === 403) {
+      const bodyText = await response.text();
+      console.error('Target returned 403:', targetUrl, bodyText.substring(0, 500));
+      return new Response(
+        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>403 - Access Denied</title>' +
+        '<style>body{font-family:sans-serif;max-width:800px;margin:50px auto;padding:20px}' +
+        'h1{color:#e74c3c}.box{background:#f8f9fa;border-left:4px solid #e74c3c;padding:15px;margin:20px 0}' +
+        'code{background:#eee;padding:2px 6px;border-radius:3px}</style></head>' +
+        '<body><h1>🚫 403 - Access Denied</h1>' +
+        '<div class="box"><p><strong>目标网站拒绝了代理请求。</strong></p>' +
+        '<p>目标: <code>' + targetUrl + '</code></p>' +
+        '<p>原因: 目标网站可能启用了 Cloudflare WAF 或其他反代理机制，' +
+        '检测到请求来自 Cloudflare Workers 的数据中心 IP 并拒绝访问。</p>' +
+        '<p>建议: 尝试代理其他网站，或使用其他代理方式。</p></div>' +
+        '<hr><p style="color:#666;font-size:0.9em">Universal Web Proxy v5.1</p></body></html>',
+        {
+          status: 403,
+          headers: {
+            'Content-Type': 'text/html;charset=UTF-8',
+            ...getCorsHeaders(origin),
+          },
+        }
+      );
+    }
+
     const respHeaders = new Headers(response.headers);
 
     Object.entries(getCorsHeaders(origin)).forEach(function([k, v]) { respHeaders.set(k, v); });
@@ -418,14 +462,14 @@ async function handleRequest(request, env) {
       status: 'ok', 
       timestamp: new Date().toISOString(),
       mode: 'universal-proxy',
-      version: '5.0.0'
+      version: '5.1.0'
     });
   }
 
   if (pathname === '/api/info') {
     return jsonResponse({
       name: 'Universal Web Proxy + HF Proxy',
-      version: '5.0.0',
+      version: '5.1.0',
       features: [
         'Universal website proxy via /proxy/<target>',
         'Hugging Face full proxy',
@@ -434,6 +478,7 @@ async function handleRequest(request, env) {
         'SSE streaming',
         'Cookie rewriting',
         'Content URL rewriting',
+        'Real browser headers for generic proxy',
       ],
       usage: {
         generic: '/proxy/<target-domain>/<path>?target=<full-url>',
@@ -511,7 +556,6 @@ async function handleRequest(request, env) {
 }
 
 // ==================== 前端页面 ====================
-// 关键修复：使用字符串拼接代替模板字符串，避免 ${domain} 冲突
 
 function serveFrontend(domain) {
   var html = '<!DOCTYPE html>' +
@@ -519,7 +563,7 @@ function serveFrontend(domain) {
 '<head>' +
 '  <meta charset="UTF-8">' +
 '  <meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-'  <title>Universal Web Proxy v5.0</title>' +
+'  <title>Universal Web Proxy v5.1</title>' +
 '  <style>' +
 '    * { margin: 0; padding: 0; box-sizing: border-box; }' +
 '    :root {' +
@@ -605,6 +649,8 @@ function serveFrontend(domain) {
 '    .badge-v5 { background: var(--info); color: white; }' +
 '    .warning-box { background: rgba(245,158,11,0.1); border: 1px solid var(--warning); border-radius: 0.5rem; padding: 1rem; margin: 1rem 0; }' +
 '    .warning-box p { color: var(--text); font-size: 0.95rem; }' +
+'    .error-box { background: rgba(239,68,68,0.1); border: 1px solid var(--error); border-radius: 0.5rem; padding: 1rem; margin: 1rem 0; }' +
+'    .error-box p { color: var(--text); font-size: 0.95rem; }' +
 '    .mode-switch { display: flex; gap: 1rem; margin-bottom: 1rem; justify-content: center; }' +
 '    .mode-btn { padding: 0.5rem 1.5rem; border-radius: 2rem; border: 2px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.2s; }' +
 '    .mode-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(245,158,11,0.1); }' +
@@ -627,7 +673,7 @@ function serveFrontend(domain) {
 '  <div class="container">' +
 '    <header>' +
 '      <div class="logo" style="font-size: 3rem; margin-bottom: 0.5rem;">🌐</div>' +
-'      <h1>Universal Web Proxy <span class="badge badge-v5">v5.0</span></h1>' +
+'      <h1>Universal Web Proxy <span class="badge badge-v5">v5.1</span></h1>' +
 '      <p class="subtitle">通用网站代理 + Hugging Face 专用代理</p>' +
 '      <div class="status-badge">' +
 '        <span class="status-dot"></span>' +
@@ -647,7 +693,10 @@ function serveFrontend(domain) {
 '          输入任意网站 URL，通过代理访问。支持 HTML 页面、API、静态资源等。' +
 '        </p>' +
 '        <div class="warning-box">' +
-'          <p>⚠️ <strong>注意：</strong>部分网站可能有反代理机制（如 Cloudflare 5秒盾、CSP 等），代理可能无法完全正常工作。</p>' +
+'          <p>⚠️ <strong>注意：</strong>部分网站可能有反代理机制（如 Cloudflare WAF、CSP 等），代理可能无法完全正常工作。</p>' +
+'        </div>' +
+'        <div class="error-box" id="genericErrorBox" style="display:none">' +
+'          <p id="genericErrorMsg"></p>' +
 '        </div>' +
 '        <div class="input-group">' +
 '          <input type="text" id="genericUrl" placeholder="https://example.com 或 example.com/path" style="flex: 3;">' +
