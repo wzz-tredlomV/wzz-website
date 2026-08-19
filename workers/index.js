@@ -1,6 +1,6 @@
 /**
- * 通用网站代理 + Hugging Face 专用代理 v5.1
- * 修复: 添加真实浏览器 User-Agent，处理 Cloudflare WAF 拦截
+ * 通用网站代理 + Hugging Face 专用代理 v5.2
+ * 修复: switchMode event 未定义问题，按钮点击不跳转
  * 支持：任意网站代理（通过 /proxy/<target>）+ 完整的 Hugging Face 代理
  */
 
@@ -15,7 +15,6 @@ const HF_API_HOSTS = {
   '/cdn-lfs/': 'cdn-lfs.huggingface.co',
 };
 
-// 真实浏览器 User-Agent
 const REAL_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
 
 // ==================== 工具函数 ====================
@@ -72,7 +71,6 @@ function buildProxyHeaders(request, targetHost, proxyHost, isGeneric) {
   h.delete('Origin');
   h.set('Origin', 'https://' + targetHost);
 
-  // 对于通用代理，使用真实浏览器 User-Agent
   if (isGeneric) {
     h.set('User-Agent', REAL_USER_AGENT);
     h.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
@@ -89,7 +87,6 @@ function buildProxyHeaders(request, targetHost, proxyHost, isGeneric) {
     h.set('DNT', '1');
   }
 
-  // 删除 Cloudflare 相关头部（防止被目标识别为 Cloudflare Worker）
   const cfHeaders = ['CF-Connecting-IP', 'CF-Visitor', 'CF-Ray', 'CF-Worker', 'CF-IPCountry', 'CF-Request-ID', 'Cf-Bot', 'Cf-Access-Jwt-Assertion'];
   for (const cfh of cfHeaders) h.delete(cfh);
 
@@ -230,7 +227,6 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
 
     const response = await fetch(proxyReq);
 
-    // 如果目标返回 403，可能是 WAF 拦截，返回详细错误信息
     if (response.status === 403) {
       const bodyText = await response.text();
       console.error('Target returned 403:', targetUrl, bodyText.substring(0, 500));
@@ -239,13 +235,12 @@ async function proxyRequest(request, targetUrl, targetHost, proxyHost, rewriteFn
         '<style>body{font-family:sans-serif;max-width:800px;margin:50px auto;padding:20px}' +
         'h1{color:#e74c3c}.box{background:#f8f9fa;border-left:4px solid #e74c3c;padding:15px;margin:20px 0}' +
         'code{background:#eee;padding:2px 6px;border-radius:3px}</style></head>' +
-        '<body><h1>🚫 403 - Access Denied</h1>' +
-        '<div class="box"><p><strong>目标网站拒绝了代理请求。</strong></p>' +
-        '<p>目标: <code>' + targetUrl + '</code></p>' +
-        '<p>原因: 目标网站可能启用了 Cloudflare WAF 或其他反代理机制，' +
-        '检测到请求来自 Cloudflare Workers 的数据中心 IP 并拒绝访问。</p>' +
-        '<p>建议: 尝试代理其他网站，或使用其他代理方式。</p></div>' +
-        '<hr><p style="color:#666;font-size:0.9em">Universal Web Proxy v5.1</p></body></html>',
+        '<body><h1>403 - Access Denied</h1>' +
+        '<div class="box"><p><strong>Target website rejected the proxy request.</strong></p>' +
+        '<p>Target: <code>' + targetUrl + '</code></p>' +
+        '<p>Reason: The target may have Cloudflare WAF or anti-proxy protection.</p>' +
+        '<p>Try a different website.</p></div>' +
+        '<hr><p style="color:#666;font-size:0.9em">Universal Web Proxy v5.2</p></body></html>',
         {
           status: 403,
           headers: {
@@ -462,14 +457,14 @@ async function handleRequest(request, env) {
       status: 'ok', 
       timestamp: new Date().toISOString(),
       mode: 'universal-proxy',
-      version: '5.1.0'
+      version: '5.2.0'
     });
   }
 
   if (pathname === '/api/info') {
     return jsonResponse({
       name: 'Universal Web Proxy + HF Proxy',
-      version: '5.1.0',
+      version: '5.2.0',
       features: [
         'Universal website proxy via /proxy/<target>',
         'Hugging Face full proxy',
@@ -490,7 +485,6 @@ async function handleRequest(request, env) {
     });
   }
 
-  // 通用代理路由
   if (pathname.startsWith('/proxy/')) {
     const pathTarget = pathname.replace(/^\/proxy\//, '').split('/')[0];
     const queryTarget = url.searchParams.get('target');
@@ -506,7 +500,6 @@ async function handleRequest(request, env) {
     return handleGenericProxy(request, env, directTarget);
   }
 
-  // Hugging Face 专用路由
   if (pathname === '/' || pathname === '/index.html') {
     if (directTarget) {
       return handleGenericProxy(request, env, directTarget);
@@ -563,7 +556,7 @@ function serveFrontend(domain) {
 '<head>' +
 '  <meta charset="UTF-8">' +
 '  <meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-'  <title>Universal Web Proxy v5.1</title>' +
+'  <title>Universal Web Proxy v5.2</title>' +
 '  <style>' +
 '    * { margin: 0; padding: 0; box-sizing: border-box; }' +
 '    :root {' +
@@ -673,7 +666,7 @@ function serveFrontend(domain) {
 '  <div class="container">' +
 '    <header>' +
 '      <div class="logo" style="font-size: 3rem; margin-bottom: 0.5rem;">🌐</div>' +
-'      <h1>Universal Web Proxy <span class="badge badge-v5">v5.1</span></h1>' +
+'      <h1>Universal Web Proxy <span class="badge badge-v5">v5.2</span></h1>' +
 '      <p class="subtitle">通用网站代理 + Hugging Face 专用代理</p>' +
 '      <div class="status-badge">' +
 '        <span class="status-dot"></span>' +
@@ -682,8 +675,8 @@ function serveFrontend(domain) {
 '    </header>' +
 '' +
 '    <div class="mode-switch">' +
-'      <button class="mode-btn active" onclick="switchMode(\'generic\')">🌍 通用代理</button>' +
-'      <button class="mode-btn" onclick="switchMode(\'hf\')">🤗 Hugging Face</button>' +
+'      <button class="mode-btn active" data-mode="generic" id="btn-generic">🌍 通用代理</button>' +
+'      <button class="mode-btn" data-mode="hf" id="btn-hf">🤗 Hugging Face</button>' +
 '    </div>' +
 '' +
 '    <div id="generic-panel" class="section active">' +
@@ -700,12 +693,12 @@ function serveFrontend(domain) {
 '        </div>' +
 '        <div class="input-group">' +
 '          <input type="text" id="genericUrl" placeholder="https://example.com 或 example.com/path" style="flex: 3;">' +
-'          <button onclick="goToGeneric()">🚀 访问</button>' +
-'          <button class="secondary" onclick="copyGenericUrl()">📋 复制</button>' +
+'          <button id="btn-go-generic">🚀 访问</button>' +
+'          <button class="secondary" id="btn-copy-generic">📋 复制</button>' +
 '        </div>' +
 '        <div class="url-display" id="genericUrlDisplay">' +
 '          <span id="genericGeneratedUrl">' + domain + '/proxy/example.com</span>' +
-'          <button class="copy-btn secondary" onclick="copyGenericGenerated()">复制</button>' +
+'          <button class="copy-btn secondary" id="btn-copy-gen-url">复制</button>' +
 '        </div>' +
 '        ' +
 '        <h3 style="margin: 1.5rem 0 0.5rem; font-size: 1rem;">使用方式：</h3>' +
@@ -736,21 +729,21 @@ function serveFrontend(domain) {
 '          <input type="text" id="resourcePath" placeholder="例如: bert-base-chinese 或 microsoft/DialoGPT-medium">' +
 '        </div>' +
 '        <div class="input-group">' +
-'          <button onclick="goToResource()">🚀 访问</button>' +
-'          <button class="secondary" onclick="copyUrl()">📋 复制链接</button>' +
+'          <button id="btn-go-resource">🚀 访问</button>' +
+'          <button class="secondary" id="btn-copy-resource">📋 复制链接</button>' +
 '        </div>' +
 '        <div class="url-display" id="urlDisplay">' +
 '          <span id="generatedUrl">' + domain + '/models/bert-base-chinese</span>' +
-'          <button class="copy-btn secondary" onclick="copyGeneratedUrl()">复制</button>' +
+'          <button class="copy-btn secondary" id="btn-copy-gen">复制</button>' +
 '        </div>' +
 '      </div>' +
 '' +
 '      <div class="card">' +
 '        <h2>🔐 登录 / 注册</h2>' +
 '        <div class="input-group">' +
-'          <button class="info" onclick="window.open(\'' + domain + '/login\', \'_blank\')">🔑 登录</button>' +
-'          <button class="info" onclick="window.open(\'' + domain + '/join\', \'_blank\')">✨ 注册</button>' +
-'          <button class="secondary" onclick="window.open(\'' + domain + '/settings/profile\', \'_blank\')">⚙️ 设置</button>' +
+'          <button class="info" id="btn-login">🔑 登录</button>' +
+'          <button class="info" id="btn-join">✨ 注册</button>' +
+'          <button class="secondary" id="btn-settings">⚙️ 设置</button>' +
 '        </div>' +
 '      </div>' +
 '' +
@@ -758,22 +751,22 @@ function serveFrontend(domain) {
 '        <h2>🎨 Gradio Space 代理</h2>' +
 '        <div class="input-group">' +
 '          <input type="text" id="spacePath" placeholder="username/space-name" style="flex: 1;">' +
-'          <button class="gradio" onclick="goToSpace()">🚀 访问 Space</button>' +
+'          <button class="gradio" id="btn-go-space">🚀 访问 Space</button>' +
 '        </div>' +
 '        <div class="url-display">' +
 '          <span id="spaceUrl">' + domain + '/spaces/username/space-name</span>' +
-'          <button class="copy-btn secondary" onclick="copySpaceUrl()">复制</button>' +
+'          <button class="copy-btn secondary" id="btn-copy-space">复制</button>' +
 '        </div>' +
 '      </div>' +
 '' +
 '      <div class="card">' +
 '        <h2>💻 使用示例</h2>' +
-'        <div class="tabs">' +
-'          <button class="tab active" onclick="switchTab(\'python\')">Python</button>' +
-'          <button class="tab" onclick="switchTab(\'curl\')">cURL</button>' +
-'          <button class="tab" onclick="switchTab(\'js\')">JavaScript</button>' +
-'          <button class="tab" onclick="switchTab(\'git\')">Git</button>' +
-'          <button class="tab" onclick="switchTab(\'gradio\')">Gradio</button>' +
+'        <div class="tabs" id="tabs-container">' +
+'          <button class="tab active" data-tab="python">Python</button>' +
+'          <button class="tab" data-tab="curl">cURL</button>' +
+'          <button class="tab" data-tab="js">JavaScript</button>' +
+'          <button class="tab" data-tab="git">Git</button>' +
+'          <button class="tab" data-tab="gradio">Gradio</button>' +
 '        </div>' +
 '        <div id="python" class="tab-content active">' +
 '          <div class="code-block">' +
@@ -864,80 +857,110 @@ function serveFrontend(domain) {
 '  <script>' +
 '    const domain = window.location.origin;' +
 '    ' +
-'    function switchMode(mode) {' +
+'    function switchMode(mode, btn) {' +
 '      document.querySelectorAll(".mode-btn").forEach(function(b) { b.classList.remove("active"); });' +
 '      document.querySelectorAll(".section").forEach(function(s) { s.classList.remove("active"); });' +
-'      event.target.classList.add("active");' +
+'      if (btn) btn.classList.add("active");' +
 '      document.getElementById(mode + "-panel").classList.add("active");' +
 '    }' +
+'    ' +
+'    document.getElementById("btn-generic").addEventListener("click", function() { switchMode("generic", this); });' +
+'    document.getElementById("btn-hf").addEventListener("click", function() { switchMode("hf", this); });' +
 '    ' +
 '    function updateGenericUrl() {' +
 '      var url = document.getElementById("genericUrl").value.trim() || "example.com";' +
 '      var cleanUrl = url.replace(/^https?:\/\//, "");' +
 '      document.getElementById("genericGeneratedUrl").textContent = domain + "/proxy/" + cleanUrl;' +
 '    }' +
-'    function goToGeneric() {' +
+'    ' +
+'    document.getElementById("btn-go-generic").addEventListener("click", function() {' +
 '      var url = document.getElementById("genericUrl").value.trim();' +
 '      if (!url) { showToast("请输入目标 URL"); return; }' +
 '      var cleanUrl = url.replace(/^https?:\/\//, "");' +
 '      window.open(domain + "/proxy/" + cleanUrl, "_blank");' +
-'    }' +
-'    function copyGenericUrl() {' +
+'    });' +
+'    ' +
+'    document.getElementById("btn-copy-generic").addEventListener("click", function() {' +
 '      var url = document.getElementById("genericUrl").value.trim() || "example.com";' +
 '      var cleanUrl = url.replace(/^https?:\/\//, "");' +
 '      navigator.clipboard.writeText(domain + "/proxy/" + cleanUrl);' +
 '      showToast("链接已复制！");' +
-'    }' +
-'    function copyGenericGenerated() {' +
+'    });' +
+'    ' +
+'    document.getElementById("btn-copy-gen-url").addEventListener("click", function() {' +
 '      navigator.clipboard.writeText(document.getElementById("genericGeneratedUrl").textContent);' +
 '      showToast("链接已复制！");' +
-'    }' +
+'    });' +
 '    ' +
 '    function updateUrl() {' +
 '      var type = document.getElementById("resourceType").value;' +
 '      var path = document.getElementById("resourcePath").value.trim() || "bert-base-chinese";' +
 '      document.getElementById("generatedUrl").textContent = domain + "/" + type + "/" + path;' +
 '    }' +
-'    function updateSpaceUrl() {' +
-'      var path = document.getElementById("spacePath").value.trim() || "username/space-name";' +
-'      document.getElementById("spaceUrl").textContent = domain + "/spaces/" + path;' +
-'    }' +
-'    function goToResource() {' +
+'    ' +
+'    document.getElementById("btn-go-resource").addEventListener("click", function() {' +
 '      var type = document.getElementById("resourceType").value;' +
 '      var path = document.getElementById("resourcePath").value.trim();' +
 '      if (!path) { showToast("请输入资源路径"); return; }' +
 '      window.open(domain + "/" + type + "/" + path, "_blank");' +
-'    }' +
-'    function goToSpace() {' +
-'      var path = document.getElementById("spacePath").value.trim();' +
-'      if (!path) { showToast("请输入 Space 路径"); return; }' +
-'      window.open(domain + "/spaces/" + path, "_blank");' +
-'    }' +
-'    function copyUrl() {' +
+'    });' +
+'    ' +
+'    document.getElementById("btn-copy-resource").addEventListener("click", function() {' +
 '      var type = document.getElementById("resourceType").value;' +
 '      var path = document.getElementById("resourcePath").value.trim() || "bert-base-chinese";' +
 '      navigator.clipboard.writeText(domain + "/" + type + "/" + path);' +
 '      showToast("链接已复制！");' +
+'    });' +
+'    ' +
+'    document.getElementById("btn-copy-gen").addEventListener("click", function() {' +
+'      navigator.clipboard.writeText(document.getElementById("generatedUrl").textContent);' +
+'      showToast("链接已复制！");' +
+'    });' +
+'    ' +
+'    function updateSpaceUrl() {' +
+'      var path = document.getElementById("spacePath").value.trim() || "username/space-name";' +
+'      document.getElementById("spaceUrl").textContent = domain + "/spaces/" + path;' +
 '    }' +
-'    function copySpaceUrl() {' +
+'    ' +
+'    document.getElementById("btn-go-space").addEventListener("click", function() {' +
+'      var path = document.getElementById("spacePath").value.trim();' +
+'      if (!path) { showToast("请输入 Space 路径"); return; }' +
+'      window.open(domain + "/spaces/" + path, "_blank");' +
+'    });' +
+'    ' +
+'    document.getElementById("btn-copy-space").addEventListener("click", function() {' +
 '      var path = document.getElementById("spacePath").value.trim() || "username/space-name";' +
 '      navigator.clipboard.writeText(domain + "/spaces/" + path);' +
 '      showToast("Space 链接已复制！");' +
+'    });' +
+'    ' +
+'    document.getElementById("btn-login").addEventListener("click", function() {' +
+'      window.open(domain + "/login", "_blank");' +
+'    });' +
+'    document.getElementById("btn-join").addEventListener("click", function() {' +
+'      window.open(domain + "/join", "_blank");' +
+'    });' +
+'    document.getElementById("btn-settings").addEventListener("click", function() {' +
+'      window.open(domain + "/settings/profile", "_blank");' +
+'    });' +
+'    ' +
+'    function switchTab(name, btn) {' +
+'      document.querySelectorAll(".tab").forEach(function(t) { t.classList.remove("active"); });' +
+'      document.querySelectorAll(".tab-content").forEach(function(t) { t.classList.remove("active"); });' +
+'      if (btn) btn.classList.add("active");' +
+'      document.getElementById(name).classList.add("active");' +
 '    }' +
-'    function copyGeneratedUrl() {' +
-'      navigator.clipboard.writeText(document.getElementById("generatedUrl").textContent);' +
-'      showToast("链接已复制！");' +
-'    }' +
+'    ' +
+'    document.querySelectorAll("#tabs-container .tab").forEach(function(tab) {' +
+'      tab.addEventListener("click", function() {' +
+'        switchTab(this.getAttribute("data-tab"), this);' +
+'      });' +
+'    });' +
+'    ' +
 '    function showToast(msg) {' +
 '      var t = document.getElementById("toast");' +
 '      t.textContent = msg; t.classList.add("show");' +
 '      setTimeout(function() { t.classList.remove("show"); }, 2000);' +
-'    }' +
-'    function switchTab(name) {' +
-'      document.querySelectorAll(".tab").forEach(function(t) { t.classList.remove("active"); });' +
-'      document.querySelectorAll(".tab-content").forEach(function(t) { t.classList.remove("active"); });' +
-'      event.target.classList.add("active");' +
-'      document.getElementById(name).classList.add("active");' +
 '    }' +
 '    ' +
 '    document.getElementById("genericUrl").addEventListener("input", updateGenericUrl);' +
